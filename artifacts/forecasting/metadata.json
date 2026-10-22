@@ -1,0 +1,43 @@
+{
+  "selected_sarimax": "sarimax_weather_lag_3",
+  "selected_by": "Mean validation 168-hour MAE; complete folds only",
+  "spec": {
+    "name": "sarimax_weather_lag_3",
+    "kind": "sarimax",
+    "mode": "weather_lag",
+    "order": [
+      1,
+      0,
+      0
+    ],
+    "seasonal_order": [
+      1,
+      0,
+      0,
+      24
+    ]
+  },
+  "validation_start": "2023-01-01 00:00:00",
+  "test_start": "2023-07-01 00:00:00",
+  "validation_origins": [
+    "2023-01-01 00:00:00",
+    "2023-03-26 00:00:00",
+    "2023-06-18 00:00:00"
+  ],
+  "test_origins": [
+    "2023-07-01 00:00:00",
+    "2023-09-23 00:00:00",
+    "2023-12-23 00:00:00"
+  ],
+  "rain_threshold_mm": 9.464000000000032,
+  "training_window_days": 90,
+  "quick_mode": false,
+  "data_sha256": "d309f3b71a67fe0fe9f525232023a6fe2f242d4e79f294f9dbab0a1317dc76ee",
+  "weather_mode": "Conditional backtest using observed future precipitation",
+  "forecast_mode": "Historical demonstration, not a live forecast",
+  "timezone": "Asia/Manila, stored as naive local hourly timestamps",
+  "interval": "Nominal 95% SARIMAX predictive bounds clipped at zero; weather uncertainty excluded",
+  "data_provenance": "User-supplied data; original HILOM generator produces synthetic patient counts",
+  "python": "3.11.13",
+  "failures": 0
+}

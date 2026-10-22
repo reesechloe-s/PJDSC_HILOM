@@ -1,0 +1,16 @@
+model,mae,folds
+sarimax_weather_lag_3,2.3098997548584124,3
+sarimax_calendar_3,2.310349656248573,3
+sarimax_weather_3,2.3104506896655193,3
+sarimax_weather_lag_0,2.3113703633750116,3
+sarimax_weather_lag_2,2.311751691271405,3
+sarimax_calendar_0,2.311787322021422,3
+sarimax_weather_lag_1,2.311792436620562,3
+sarimax_weather_0,2.311897350010643,3
+sarimax_calendar_2,2.312175770921525,3
+sarimax_calendar_1,2.312217801790604,3
+sarimax_weather_2,2.3122813190056015,3
+sarimax_weather_1,2.312324794655903,3
+gradient_boosted_weather_lag,2.382958328950503,3
+hour_of_week_mean,2.4387845950345954,3
+weekly_naive,3.176587301587302,3

@@ -1,0 +1,5 @@
+
+# Generated model and Python cache
+artifacts/forecasting/sarimax_historical_demo.pkl
+__pycache__/
+*.pyc
