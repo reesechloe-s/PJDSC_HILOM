@@ -1,116 +1,247 @@
-import numpy as np                       
-import pandas as pd                      # DataFrames (tables)
-import streamlit as st           
-
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+from simulation.config import DEFAULT_CONFIG, SimulationConfig
+from simulation.engine3 import SimulationResult, run_simulation
 
 PROJECT_DIR = Path(__file__).resolve().parent
 FACILITIES_PATH = PROJECT_DIR / "data" / "alternative_facilities.parquet"
-        # dashboard lib
+RANDOM_SEED = 42
 
-# page setup: title, layout, etc.
-st.set_page_config(page_title="ED Load Balancer", layout="wide")  
-st.title("Emergency Department Load Balancer")                    
-st.caption("Decision-support tool. Demo data only.")              
+st.set_page_config(page_title="ED Load Balancer", layout="wide")
+st.title("Emergency Department Load Balancer")
+st.caption("Decision-support tool. Demo data only.")
 
 
 @st.cache_data
-def load_facilities():
+def load_facilities() -> pd.DataFrame:
     return pd.read_parquet(FACILITIES_PATH)
 
+
 @st.cache_data
-def make_mock_forecast():
-    # 7 days of hourly timestamps starting from the current hour
+def make_mock_forecast() -> pd.DataFrame:
     start = pd.Timestamp.now().floor("h")
     times = pd.date_range(start, periods=7 * 24, freq="h")
     hours = np.arange(len(times))
 
-    # fake arrivals: a daily wave (peak mid-day) + small random noise
-    rng = np.random.default_rng(42)  # fixed seed so the fake data doesn't change
-    forecast = 20 + 8 * np.sin(2 * np.pi * (hours % 24 - 6) / 24) + rng.normal(0, 1.5, len(times))
-    forecast = np.clip(forecast, 1, None)  # arrivals can't be negative
-    
-    # same shape as Kath's future output: timestamp, forecast, lower, upper
-    return pd.DataFrame({
-        "timestamp": times,
-        "forecast": forecast,
-        "lower": forecast * 0.85,   # fake lower bound of the forecast range
-        "upper": forecast * 1.15,   # fake upper bound
-    })
+    rng = np.random.default_rng(RANDOM_SEED)
+    forecast = 20 + 8 * np.sin(2 * np.pi * (hours % 24 - 6) / 24)
+    forecast += rng.normal(0, 1.5, len(times))
+    forecast = np.clip(forecast, 1, None)
+
+    return pd.DataFrame(
+        {
+            "timestamp": times,
+            "forecast": forecast,
+            "lower": forecast * 0.85,
+            "upper": forecast * 1.15,
+        }
+    )
 
 
-def run_simulation(forecast_df, beds, staff, diversion_threshold):
-    # FAKE stand-in for Chloe's real function. Same inputs/outputs idea.
-    df = forecast_df.copy()                                # don't change the original table
-    capacity = min(staff * 2.0, beds / 2.0)                # patients per hour the ED can handle
-    df["utilization"] = df["forecast"] / capacity          # 1.0 means completely full
-    df["wait_min"] = 5 + 90 * np.clip(df["utilization"] - 0.7, 0, None)  # waits grow once busy
-    df["saturated"] = df["utilization"] >= diversion_threshold            # True when over the limit
-    # share of patients to divert so utilization drops back to the threshold
-    df["divert_pct"] = np.where(df["saturated"], 1 - diversion_threshold / df["utilization"], 0) * 100
-    return df
+def _dashboard_metrics(
+    result: SimulationResult, diversion_threshold: float
+) -> pd.DataFrame:
+    hourly = result.hourly.copy()
+    hourly["utilization"] = hourly["mean_bed_utilization"].fillna(0.0)
+    hourly["wait_min"] = hourly["mean_total_wait"].fillna(0.0)
+    hourly["saturated"] = hourly["utilization"] >= diversion_threshold
+    hourly["divert_pct"] = 0.0
+
+    if not result.patients.empty:
+        patients = result.patients.copy()
+        patients["_hour"] = patients["arrival_time"].floordiv(60).astype(int)
+        nonurgent = patients.loc[patients["acuity"] == "non-urgent"]
+        grouped = nonurgent.groupby("_hour")
+        nonurgent_count = grouped.size()
+        diverted_count = grouped["diversion_accepted"].sum()
+        for hour in nonurgent_count.index:
+            if hour < len(hourly) and nonurgent_count.loc[hour] > 0:
+                hourly.loc[hour, "divert_pct"] = (
+                    100.0 * diverted_count.get(hour, 0) / nonurgent_count.loc[hour]
+                )
+
+    return hourly
 
 
-# sidebar controls
-st.sidebar.header("Controls")                                                     # sidebar heading
-beds = st.sidebar.slider("Bed capacity", 10, 200, 60)                             # returns a number
-staff = st.sidebar.slider("Staff on duty", 5, 100, 25)                            # returns a number
+@st.cache_data
+def run_dashboard_simulations(
+    forecast_df: pd.DataFrame,
+    facilities: pd.DataFrame,
+    beds: int,
+    nurses: int,
+    doctors: int,
+    diversion_threshold: float,
+    wait_target: float,
+) -> tuple[SimulationResult, SimulationResult]:
+    baseline_config = SimulationConfig(
+        num_beds=beds,
+        num_nurses=nurses,
+        num_doctors=doctors,
+        diversion_occupancy_threshold=None,
+        wait_target_minutes=wait_target,
+        acuity_probabilities=DEFAULT_CONFIG.acuity_probabilities,
+        triage_min_minutes=DEFAULT_CONFIG.triage_min_minutes,
+        triage_max_minutes=DEFAULT_CONFIG.triage_max_minutes,
+        treatment_mean_minutes=DEFAULT_CONFIG.treatment_mean_minutes,
+        treatment_std_dev_minutes=DEFAULT_CONFIG.treatment_std_dev_minutes,
+    )
+    diversion_config = SimulationConfig(
+        num_beds=beds,
+        num_nurses=nurses,
+        num_doctors=doctors,
+        diversion_occupancy_threshold=diversion_threshold,
+        wait_target_minutes=wait_target,
+        acuity_probabilities=baseline_config.acuity_probabilities,
+        triage_min_minutes=baseline_config.triage_min_minutes,
+        triage_max_minutes=baseline_config.triage_max_minutes,
+        treatment_mean_minutes=baseline_config.treatment_mean_minutes,
+        treatment_std_dev_minutes=baseline_config.treatment_std_dev_minutes,
+    )
+
+    baseline = run_simulation(
+        forecast_df, config=baseline_config, facilities=facilities, seed=RANDOM_SEED
+    )
+    diversion = run_simulation(
+        forecast_df, config=diversion_config, facilities=facilities, seed=RANDOM_SEED
+    )
+    return baseline, diversion
+
+
+st.sidebar.header("Controls")
+beds = st.sidebar.slider("Bed capacity", 10, 200, DEFAULT_CONFIG.num_beds)
+nurses = st.sidebar.slider("Triage nurses on duty", 1, 40, DEFAULT_CONFIG.num_nurses)
+doctors = st.sidebar.slider("Doctors on duty", 1, 20, DEFAULT_CONFIG.num_doctors)
 threshold_pct = st.sidebar.slider("Diversion threshold (% of capacity)", 50, 100, 85)
-wait_target = st.sidebar.slider("Wait-time target (minutes)", 15, 120, 45)
-diversion_threshold = threshold_pct / 100                                         # 85 -> 0.85
+wait_target = st.sidebar.slider(
+    "Wait-time target (minutes)", 15, 120, int(DEFAULT_CONFIG.wait_target_minutes)
+)
+diversion_threshold = threshold_pct / 100
 
-# run the models (reruns automatically when a slider moves)
-forecast_df = make_mock_forecast()                                      # Kath's part (fake for now)
-sim_df = run_simulation(forecast_df, beds, staff, diversion_threshold)  # Chloe's part (fake for now)
-facilities = load_facilities()                                          # the parquet file or fake backup
+forecast_df = make_mock_forecast()
+facilities = load_facilities()
+baseline_result, diversion_result = run_dashboard_simulations(
+    forecast_df,
+    facilities,
+    beds,
+    nurses,
+    doctors,
+    diversion_threshold,
+    wait_target,
+)
+baseline_df = _dashboard_metrics(baseline_result, diversion_threshold)
+sim_df = _dashboard_metrics(diversion_result, diversion_threshold)
+facility_results = facilities.merge(
+    diversion_result.facilities[
+        ["facility_id", "referrals_accepted", "simultaneous_capacity"]
+    ],
+    on="facility_id",
+    how="left",
+)
 
-# tab layouts
-tab1, tab2, tab3, tab4 = st.tabs(["Forecast", "Queue Simulation", "Diversion", "Policy Memo"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Forecast", "Queue Simulation", "Diversion", "Policy Memo"]
+)
 
-# tab1: forecast chart
 with tab1:
     st.subheader("Projected hourly arrivals (7 days)")
-    fig = go.Figure()                                                      # empty chart
-    fig.add_trace(go.Scatter(x=sim_df["timestamp"], y=sim_df["upper"],
-                             line=dict(width=0), showlegend=False))        # invisible top edge of the band
-    fig.add_trace(go.Scatter(x=sim_df["timestamp"], y=sim_df["lower"],
-                             fill="tonexty", line=dict(width=0),
-                             name="Forecast range"))                       # shaded band down to the lower edge
-    fig.add_trace(go.Scatter(x=sim_df["timestamp"], y=sim_df["forecast"],
-                             name="Forecast"))                             # the main forecast line
-    fig.update_layout(xaxis_title="Time", yaxis_title="Patients per hour") # axis labels
-    st.plotly_chart(fig, use_container_width=True)                         # show the chart
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=forecast_df["timestamp"],
+            y=forecast_df["upper"],
+            line=dict(width=0),
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=forecast_df["timestamp"],
+            y=forecast_df["lower"],
+            fill="tonexty",
+            line=dict(width=0),
+            name="Forecast range",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=forecast_df["timestamp"],
+            y=forecast_df["forecast"],
+            name="Forecast",
+        )
+    )
+    fig.update_layout(xaxis_title="Time", yaxis_title="Patients per hour")
+    st.plotly_chart(fig, width="stretch")
 
-# tab2: queue sim results
 with tab2:
-    st.subheader("Waiting time and utilization")
-    peak_wait = sim_df["wait_min"].max()                               # worst wait in the week
-    peak_util = sim_df["utilization"].max() * 100                      # busiest hour, as a %
-    sat_hours = int(sim_df["saturated"].sum())                         # count of saturated hours
-    c1, c2, c3 = st.columns(3)                                         # three side-by-side boxes
-    c1.metric("Peak wait", f"{peak_wait:.0f} min")                     # big number cards
-    c2.metric("Peak utilization", f"{peak_util:.0f}%")
-    c3.metric("Saturated hours", sat_hours)
-    if peak_wait > wait_target:                                        # compare with the slider target
-        st.warning(f"Projected wait exceeds the {wait_target}-minute target.")
+    st.subheader("DES waiting time and bed utilization")
+    peak_wait = sim_df["wait_min"].max()
+    peak_util = sim_df["utilization"].max() * 100
+    sat_hours = int(sim_df["saturated"].sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Peak mean wait", f"{peak_wait:.0f} min")
+    c2.metric("Peak sampled bed utilization", f"{peak_util:.0f}%")
+    c3.metric("Hours at diversion threshold", sat_hours)
+
+    if peak_wait > wait_target:
+        st.warning(f"Projected mean waits exceed the {wait_target}-minute target.")
     else:
-        st.success("Projected waits stay within target.")
-    wait_fig = go.Figure(go.Scatter(x=sim_df["timestamp"], y=sim_df["wait_min"], name="Wait"))
-    wait_fig.add_hline(y=wait_target, line_dash="dash")                # dashed target line
-    wait_fig.update_layout(xaxis_title="Time", yaxis_title="Wait (minutes)")
-    st.plotly_chart(wait_fig, use_container_width=True)
+        st.success("Projected mean waits stay within target.")
 
-# tab3: diversion and map 
+    wait_fig = go.Figure()
+    wait_fig.add_trace(
+        go.Scatter(
+            x=baseline_df["timestamp"],
+            y=baseline_df["wait_min"],
+            name="Baseline (no diversion)",
+        )
+    )
+    wait_fig.add_trace(
+        go.Scatter(
+            x=sim_df["timestamp"],
+            y=sim_df["wait_min"],
+            name="DES with diversion",
+        )
+    )
+    wait_fig.add_hline(y=wait_target, line_dash="dash")
+    wait_fig.update_layout(xaxis_title="Time", yaxis_title="Mean wait (minutes)")
+    st.plotly_chart(wait_fig, width="stretch")
+
+    utilization_fig = go.Figure(
+        go.Scatter(
+            x=sim_df["timestamp"],
+            y=sim_df["utilization"] * 100,
+            name="Bed utilization",
+        )
+    )
+    utilization_fig.add_hline(y=threshold_pct, line_dash="dash")
+    utilization_fig.update_layout(
+        xaxis_title="Time", yaxis_title="Sampled bed utilization (%)"
+    )
+    st.plotly_chart(utilization_fig, width="stretch")
+
 with tab3:
-    st.subheader("Recommended diversion")
-    st.metric("Peak diversion needed", f"{sim_df['divert_pct'].max():.0f}% of non-critical patients")
-    st.write("Alternative facilities")
-    st.map(facilities, latitude="lat", longitude="lon")                # plots the points on a map
-    st.dataframe(facilities, use_container_width=True)                 # same data as a table
+    st.subheader("Simulated diversion")
+    st.metric(
+        "Peak non-urgent diversion",
+        f"{sim_df['divert_pct'].max():.0f}% of non-urgent patients",
+    )
+    st.metric(
+        "Patients diverted",
+        f"{int(diversion_result.patients['diversion_accepted'].sum())}",
+    )
+    st.write("Alternative facilities and accepted referrals")
+    st.map(facility_results, latitude="lat", longitude="lon")
+    st.dataframe(facility_results, width="stretch")
 
-# tab4: policy memo placeholder
 with tab4:
     st.subheader("Draft policy memo")
     st.info("Justin's LLM output will appear here.")
-    memo = st.text_area("Memo draft (for human review)", "Placeholder memo text...", height=200)
-    st.button("Generate memo")                                         # does nothing yet
+    memo = st.text_area(
+        "Memo draft (for human review)", "Placeholder memo text...", height=200
+    )
+    st.button("Generate memo")
