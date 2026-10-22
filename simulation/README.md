@@ -1,7 +1,7 @@
 # Queue simulation
 
-This is a standalone SimPy model. It does not modify the Streamlit template in
-`503-Sleep-Unavailable/`.
+This SimPy model is used by the Streamlit dashboard to compare baseline
+operations with a diversion scenario.
 
 ## Run
 
@@ -10,12 +10,12 @@ Install the repository-root dependencies and run:
 ```powershell
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python queuing.py
+python -m streamlit run app.py
 ```
 
-The demo compares a no-diversion baseline with an 85% bed-pressure diversion
-scenario using the first seven days of the generated hourly arrival counts as
-expected arrival rates. This is a demonstration input, not an SARIMAX forecast.
+The dashboard compares a no-diversion baseline with an adjustable bed-pressure
+diversion scenario using seven days of generated hourly arrivals. This is a
+demonstration input, not an SARIMAX forecast.
 
 ## Input and outputs
 
@@ -59,9 +59,10 @@ and service-time draws so their results can be compared more fairly.
   are distributed uniformly within that hour.
 - Acuity proportions default to 24% emergent, 47% urgent, and 29% non-urgent.
   Patients are queued FIFO for triage and by acuity priority for beds/providers.
-- Triage duration is sampled uniformly from 3–7 minutes. Treatment duration is
-  triangular with 30-minute minimum, 42-minute mode, and 55-minute maximum.
-  These are scenario assumptions from the starter code, not calibrated ED data.
+- Triage duration is sampled uniformly from 3–7 minutes. Treatment duration
+  follows a lognormal distribution parameterized by a 42-minute arithmetic
+  mean and 15-minute standard deviation. These are scenario assumptions, not
+  calibrated ED data.
 - Staffing is held constant for a run. Although the inflow file includes
   hourly doctor counts, this first version does not yet apply shift changes.
 - A bed is held while its patient waits for a provider and receives treatment.

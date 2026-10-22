@@ -1,4 +1,4 @@
-# includes the queuing logic
+"""Forecast-driven emergency-department discrete-event simulation."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -69,7 +69,9 @@ class _EmergencyDepartment:
             if int(facility["max_simultaneous_patients"]) > 0
         }
         self.patient_records: list[dict[str, Any]] = []
-        self.accepted_referrals = {facility["facility_id"]: 0 for facility in self.facilities}
+        self.accepted_referrals = {
+            facility["facility_id"]: 0 for facility in self.facilities
+        }
 
     def _service_time(self, *, triage: bool) -> float:
         if triage:
@@ -79,15 +81,17 @@ class _EmergencyDepartment:
                     self.config.triage_max_minutes,
                 )
             )
-        if self.config.treatment_min_minutes == self.config.treatment_max_minutes:
-            return self.config.treatment_min_minutes
-        return float(
-            self.rng.triangular(
-                self.config.treatment_min_minutes,
-                self.config.treatment_mode_minutes,
-                self.config.treatment_max_minutes,
-            )
-        )
+
+        mean = self.config.treatment_mean_minutes
+        standard_deviation = self.config.treatment_std_dev_minutes
+        if mean == 0:
+            return 0.0
+        if standard_deviation == 0:
+            return float(mean)
+
+        sigma_squared = np.log1p((standard_deviation / mean) ** 2)
+        mu = np.log(mean) - sigma_squared / 2
+        return float(self.rng.lognormal(mu, np.sqrt(sigma_squared)))
 
     def _bed_pressure(self) -> float:
         return (self.beds.count + len(self.beds.queue)) / self.config.num_beds
@@ -138,10 +142,10 @@ class _EmergencyDepartment:
             "acuity": acuity,
             "arrival_time": arrival_time,
             "triage_wait": 0.0,
-            "triage_service": 0.0,
+            "triage_service": triage_service,
             "bed_wait": 0.0,
             "provider_wait": 0.0,
-            "treatment_time": 0.0,
+            "treatment_time": treatment_service,
             "travel_time": 0.0,
             "total_wait": 0.0,
             "time_in_system": 0.0,
@@ -152,19 +156,16 @@ class _EmergencyDepartment:
             "facility_id": None,
             "facility_name": None,
         }
-        record["triage_service"] = triage_service
-        record["treatment_time"] = treatment_service
         self.patient_records.append(record)
 
         with self.triage_nurses.request() as nurse_request:
             yield nurse_request
             record["triage_wait"] = self.env.now - arrival_time
-            yield self.env.timeout(record["triage_service"])
+            yield self.env.timeout(triage_service)
 
         threshold = self.config.diversion_occupancy_threshold
-        eligible_for_diversion = acuity == "non-urgent"
         if (
-            eligible_for_diversion
+            acuity == "non-urgent"
             and threshold is not None
             and self._bed_pressure() >= threshold
         ):
@@ -173,7 +174,7 @@ class _EmergencyDepartment:
                 record["total_wait"] = record["triage_wait"]
                 return
 
-        priority = ACUITY_PRIORITY.get(acuity, len(ACUITY_PRIORITY))
+        priority = ACUITY_PRIORITY[acuity]
         bed_request_time = self.env.now
         with self.beds.request(priority=priority) as bed_request:
             yield bed_request
@@ -183,7 +184,7 @@ class _EmergencyDepartment:
             with self.providers.request(priority=priority) as provider_request:
                 yield provider_request
                 record["provider_wait"] = self.env.now - provider_request_time
-                yield self.env.timeout(record["treatment_time"])
+                yield self.env.timeout(treatment_service)
 
         record["total_wait"] = (
             record["triage_wait"] + record["bed_wait"] + record["provider_wait"]
@@ -217,28 +218,24 @@ def _validate_forecast(forecast_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _validate_facilities(facilities: pd.DataFrame | None) -> pd.DataFrame:
-    if facilities is None:
-        return pd.DataFrame(
-            columns=[
-                "facility_id",
-                "facility_name",
-                "travel_time_mins",
-                "max_simultaneous_patients",
-            ]
-        )
-
-    required = {
+    columns = [
         "facility_id",
         "facility_name",
         "travel_time_mins",
         "max_simultaneous_patients",
-    }
+    ]
+    if facilities is None:
+        return pd.DataFrame(columns=columns)
+
+    required = set(columns)
     missing = required.difference(facilities.columns)
     if missing:
         raise ValueError(f"Facility data is missing required columns: {sorted(missing)}")
-    result = facilities.loc[:, sorted(required)].copy()
+    result = facilities.loc[:, columns].copy()
     if result["facility_id"].isna().any() or result["facility_id"].duplicated().any():
         raise ValueError("Facility IDs must be present and unique.")
+    if result["facility_name"].isna().any():
+        raise ValueError("Facility names cannot be missing.")
     result["travel_time_mins"] = pd.to_numeric(
         result["travel_time_mins"], errors="raise"
     )
@@ -255,10 +252,21 @@ def _validate_facilities(facilities: pd.DataFrame | None) -> pd.DataFrame:
         or not np.equal(capacities, np.floor(capacities)).all()
     ):
         raise ValueError("Facility capacities must be nonnegative whole numbers.")
-    result["max_simultaneous_patients"] = result[
-        "max_simultaneous_patients"
-    ].astype(int)
+    result["max_simultaneous_patients"] = capacities.astype(int)
     return result.reset_index(drop=True)
+
+
+def _validate_config(config: SimulationConfig) -> None:
+    unknown_acuities = set(config.acuity_probabilities).difference(ACUITY_PRIORITY)
+    if unknown_acuities:
+        raise ValueError(f"Unsupported acuity categories: {sorted(unknown_acuities)}")
+    if (
+        config.treatment_mean_minutes == 0
+        and config.treatment_std_dev_minutes > 0
+    ):
+        raise ValueError(
+            "A positive treatment standard deviation requires a positive mean."
+        )
 
 
 def _hourly_results(
@@ -268,26 +276,30 @@ def _hourly_results(
     config: SimulationConfig,
 ) -> pd.DataFrame:
     hourly = forecast.copy()
-    hourly["arrival_count"] = 0
-    hourly["treated_count"] = 0
-    hourly["diverted_count"] = 0
-    hourly["diversion_offered_count"] = 0
-    hourly["diversion_rejected_count"] = 0
-    hourly["mean_triage_wait"] = np.nan
-    hourly["mean_bed_wait"] = np.nan
-    hourly["mean_provider_wait"] = np.nan
-    hourly["mean_total_wait"] = np.nan
-    hourly["mean_time_in_system"] = np.nan
-    hourly["wait_target_exceeded_count"] = 0
-    hourly["mean_bed_utilization"] = np.nan
-    hourly["mean_nurse_utilization"] = np.nan
-    hourly["mean_provider_utilization"] = np.nan
+    for column in (
+        "arrival_count",
+        "treated_count",
+        "diverted_count",
+        "diversion_offered_count",
+        "diversion_rejected_count",
+        "wait_target_exceeded_count",
+    ):
+        hourly[column] = 0
+    for column in (
+        "mean_triage_wait",
+        "mean_bed_wait",
+        "mean_provider_wait",
+        "mean_total_wait",
+        "mean_time_in_system",
+        "mean_bed_utilization",
+        "mean_nurse_utilization",
+        "mean_provider_utilization",
+    ):
+        hourly[column] = np.nan
 
     if not patients.empty:
         patient_frame = patients.copy()
-        patient_frame["_hour"] = (
-            patient_frame["arrival_time"].floordiv(60).astype(int)
-        )
+        patient_frame["_hour"] = patient_frame["arrival_time"].floordiv(60).astype(int)
         for hour, group in patient_frame.groupby("_hour"):
             if hour >= len(hourly):
                 continue
@@ -338,14 +350,14 @@ def run_simulation(
     facilities: pd.DataFrame | None = None,
     seed: int = 42,
 ) -> SimulationResult:
-    """Run a forecast-driven ED simulation and return patient/hour/facility results.
+    """Simulate arrivals, ED queues, and optional diversion from hourly forecasts.
 
-    ``forecast_df`` must have one row per consecutive hour with ``timestamp`` and
-    ``forecast`` (expected arrivals in that hour). Service-time distributions,
-    arrival sampling, and diversion thresholds are scenario assumptions until
-    calibrated against operational data.
+    Treatment durations follow a lognormal distribution parameterized by the
+    configured arithmetic mean and standard deviation. These remain scenario
+    assumptions until calibrated against operational patient-level data.
     """
     config = config or SimulationConfig()
+    _validate_config(config)
     forecast = _validate_forecast(forecast_df)
     facility_data = _validate_facilities(facilities)
     arrival_seed, service_seed = np.random.SeedSequence(seed).spawn(2)
@@ -358,14 +370,14 @@ def run_simulation(
 
     def arrivals():
         patient_id = 0
-        probabilities = list(config.acuity_probabilities.values())
         acuities = list(config.acuity_probabilities)
+        probabilities = list(config.acuity_probabilities.values())
 
         for row in forecast.itertuples(index=False):
             hour_start = float(env.now)
             count = int(arrival_rng.poisson(float(row.forecast)))
-            arrival_offsets = np.sort(arrival_rng.uniform(0.0, 60.0, count))
-            for offset in arrival_offsets:
+            offsets = np.sort(arrival_rng.uniform(0.0, 60.0, count))
+            for offset in offsets:
                 yield env.timeout(hour_start + float(offset) - env.now)
                 acuity = str(arrival_rng.choice(acuities, p=probabilities))
                 triage_service = ed._service_time(triage=True)
@@ -407,7 +419,9 @@ def run_simulation(
                 "facility_id": facility["facility_id"],
                 "facility_name": facility["facility_name"],
                 "referrals_accepted": ed.accepted_referrals[facility["facility_id"]],
-                "simultaneous_capacity": int(facility["max_simultaneous_patients"]),
+                "simultaneous_capacity": int(
+                    facility["max_simultaneous_patients"]
+                ),
             }
             for facility in ed.facilities
         ],

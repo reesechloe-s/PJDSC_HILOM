@@ -2,7 +2,8 @@ import unittest
 
 import pandas as pd
 
-from simulation import SimulationConfig, run_simulation
+from simulation.config import DEFAULT_CONFIG, SimulationConfig
+from simulation.engine3 import run_simulation
 
 
 class SimulationTests(unittest.TestCase):
@@ -24,9 +25,8 @@ class SimulationTests(unittest.TestCase):
             num_beds=3,
             triage_min_minutes=1,
             triage_max_minutes=1,
-            treatment_min_minutes=2,
-            treatment_mode_minutes=2,
-            treatment_max_minutes=2,
+            treatment_mean_minutes=2,
+            treatment_std_dev_minutes=0,
             diversion_occupancy_threshold=None,
         )
 
@@ -36,6 +36,23 @@ class SimulationTests(unittest.TestCase):
         pd.testing.assert_frame_equal(first.patients, second.patients)
         pd.testing.assert_frame_equal(first.hourly, second.hourly)
 
+    def test_default_resource_baseline_runs_without_diversion(self) -> None:
+        baseline_config = SimulationConfig(diversion_occupancy_threshold=None)
+
+        result = run_simulation(
+            self.forecast([8]),
+            config=baseline_config,
+            seed=7,
+        )
+
+        self.assertEqual(baseline_config.num_beds, DEFAULT_CONFIG.num_beds)
+        self.assertEqual(baseline_config.num_nurses, DEFAULT_CONFIG.num_nurses)
+        self.assertEqual(baseline_config.num_doctors, DEFAULT_CONFIG.num_doctors)
+        self.assertFalse(result.patients["diversion_offered"].any())
+        self.assertFalse(result.patients["diversion_accepted"].any())
+        self.assertEqual(result.hourly.loc[0, "arrival_count"], len(result.patients))
+        self.assertIn("mean_total_wait", result.hourly.columns)
+
     def test_diversion_only_accepts_nonurgent_and_respects_capacity(self) -> None:
         config = SimulationConfig(
             num_doctors=1,
@@ -44,9 +61,8 @@ class SimulationTests(unittest.TestCase):
             acuity_probabilities={"non-urgent": 1.0},
             triage_min_minutes=0,
             triage_max_minutes=0,
-            treatment_min_minutes=120,
-            treatment_mode_minutes=120,
-            treatment_max_minutes=120,
+            treatment_mean_minutes=120,
+            treatment_std_dev_minutes=0,
             diversion_occupancy_threshold=0.0,
         )
         facilities = pd.DataFrame(
@@ -74,9 +90,8 @@ class SimulationTests(unittest.TestCase):
             num_beds=3,
             triage_min_minutes=1,
             triage_max_minutes=2,
-            treatment_min_minutes=2,
-            treatment_mode_minutes=3,
-            treatment_max_minutes=4,
+            treatment_mean_minutes=3,
+            treatment_std_dev_minutes=0.5,
             diversion_occupancy_threshold=None,
         )
         facilities = pd.DataFrame(
@@ -96,9 +111,8 @@ class SimulationTests(unittest.TestCase):
                 num_beds=3,
                 triage_min_minutes=1,
                 triage_max_minutes=2,
-                treatment_min_minutes=2,
-                treatment_mode_minutes=3,
-                treatment_max_minutes=4,
+                treatment_mean_minutes=3,
+                treatment_std_dev_minutes=0.5,
                 diversion_occupancy_threshold=0.0,
             ),
             facilities,
@@ -122,9 +136,8 @@ class SimulationTests(unittest.TestCase):
             acuity_probabilities={"non-urgent": 1.0},
             triage_min_minutes=0,
             triage_max_minutes=0,
-            treatment_min_minutes=1,
-            treatment_mode_minutes=1,
-            treatment_max_minutes=1,
+            treatment_mean_minutes=1,
+            treatment_std_dev_minutes=0,
             diversion_occupancy_threshold=0.0,
         )
         facilities = pd.DataFrame(
