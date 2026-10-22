@@ -158,8 +158,17 @@ class _EmergencyDepartment:
         }
         self.patient_records.append(record)
 
+        # Added patient reneging logic to prevent infinite queues
         with self.triage_nurses.request() as nurse_request:
-            yield nurse_request
+            triage_results = yield nurse_request | self.env.timeout(360.0) # 6 hours max wait
+            
+            if nurse_request not in triage_results:
+                record["status"] = "left_without_being_seen"
+                record["triage_wait"] = self.env.now - arrival_time
+                record["total_wait"] = record["triage_wait"]
+                record["time_in_system"] = self.env.now - arrival_time
+                return
+                
             record["triage_wait"] = self.env.now - arrival_time
             yield self.env.timeout(triage_service)
 
@@ -176,15 +185,33 @@ class _EmergencyDepartment:
 
         priority = ACUITY_PRIORITY[acuity]
         bed_request_time = self.env.now
+        
         with self.beds.request(priority=priority) as bed_request:
-            yield bed_request
+            # Added patient reneging for bed wait
+            bed_results = yield bed_request | self.env.timeout(360.0)
+            
+            if bed_request not in bed_results:
+                record["status"] = "left_without_being_seen"
+                record["bed_wait"] = self.env.now - bed_request_time
+                record["total_wait"] = record["triage_wait"] + record["bed_wait"]
+                record["time_in_system"] = self.env.now - arrival_time
+                return
+                
             record["bed_wait"] = self.env.now - bed_request_time
 
             provider_request_time = self.env.now
             with self.providers.request(priority=priority) as provider_request:
                 yield provider_request
                 record["provider_wait"] = self.env.now - provider_request_time
-                yield self.env.timeout(treatment_service)
+                
+                # Providers only spend a fraction of treatment time with the patient
+                provider_consult_time = min(15.0, treatment_service * 0.3)
+                yield self.env.timeout(provider_consult_time)
+                
+            # Bed remains occupied for the rest of the treatment time
+            remaining_treatment_time = treatment_service - provider_consult_time
+            if remaining_treatment_time > 0:
+                yield self.env.timeout(remaining_treatment_time)
 
         record["total_wait"] = (
             record["triage_wait"] + record["bed_wait"] + record["provider_wait"]
@@ -280,6 +307,7 @@ def _hourly_results(
         "arrival_count",
         "treated_count",
         "diverted_count",
+        "lwbs_count", # Added tracker for left without being seen
         "diversion_offered_count",
         "diversion_rejected_count",
         "wait_target_exceeded_count",
@@ -307,6 +335,9 @@ def _hourly_results(
             hourly.loc[hour, "treated_count"] = int((group["status"] == "treated").sum())
             hourly.loc[hour, "diverted_count"] = int(
                 (group["status"] == "diverted").sum()
+            )
+            hourly.loc[hour, "lwbs_count"] = int(
+                (group["status"] == "left_without_being_seen").sum()
             )
             hourly.loc[hour, "diversion_offered_count"] = int(
                 group["diversion_offered"].sum()
