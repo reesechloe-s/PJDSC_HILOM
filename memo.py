@@ -3,8 +3,8 @@
 Design rules (from the proposal: LLM drafts from *verified* model outputs, human reviews):
   1. Every number comes from `build_memo_facts`, i.e. from the simulation, never from the LLM.
   2. A deterministic template memo always works (no key, no network, instant).
-  3. If an API key is set, an LLM rewrites the same facts; any number it uses that is not
-     in the facts is flagged for the reviewer.
+  3. If a Google AI Studio (Gemini) API key is set, the LLM rewrites the same facts; any
+     number it uses that is not in the facts is flagged for the reviewer.
 No Streamlit imports here, so the module is unit-testable.
 """
 from __future__ import annotations
@@ -14,10 +14,14 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pandas as pd
 
-DEFAULT_MODEL = os.environ.get("HILOM_LLM_MODEL", "claude-sonnet-5-5")
+# Model name from Google's current Gemini quickstart; override with HILOM_LLM_MODEL if AI Studio
+# lists a different one for your key.
+DEFAULT_MODEL = os.environ.get("HILOM_LLM_MODEL", "gemini-3.7-flash")
+API_KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")  # AI Studio keys use either name
 LLM_TIMEOUT_S = 10.0  # proposal target: memo within 10 seconds
 
 SYSTEM_PROMPT = (
@@ -37,6 +41,51 @@ class MemoResult:
     source: str                      # "llm" or "template"
     note: str = ""                   # why the template was used, if it was
     unverified_numbers: list = field(default_factory=list)
+
+
+def read_env_key(path, name: str = "GEMINI_API_KEY") -> str | None:
+    """Read NAME from a .env file without extra dependencies. Streamlit does not load .env itself.
+    Handles a Windows BOM, `export NAME=...`, quotes and trailing comments."""
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        key, sep, val = line.partition("=")
+        if sep and key.strip() == name:
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            else:
+                val = val.split(" #")[0].strip()
+            return val or None
+    return None
+
+
+def get_api_key(env_paths=(), secrets=None) -> str | None:
+    """First key found in: real environment, each .env path, then a secrets mapping."""
+    for name in API_KEY_NAMES:
+        if os.environ.get(name):
+            return os.environ[name]
+    for path in env_paths:
+        for name in API_KEY_NAMES:
+            key = read_env_key(path, name)
+            if key:
+                return key
+    if secrets is not None:
+        for name in API_KEY_NAMES:
+            try:
+                key = secrets.get(name)
+            except Exception:
+                key = None
+            if key:
+                return key
+    return None
 
 
 # ----------------------------------------------------------------------------- facts
@@ -60,13 +109,14 @@ def build_memo_facts(
     diverted_total: int,
     forecast_df: pd.DataFrame,
 ) -> dict:
-    fac_cols = [c for c in ("facility_name", "travel_time_mins", "simultaneous_capacity",
-                            "referrals_accepted") if c in facility_results.columns]
+    fac_cols = [c for c in ("facility_name", "travel_time_mins", "max_simultaneous_patients",
+                            "simultaneous_capacity", "referrals_accepted")
+                if c in facility_results.columns]
     facilities = (
         facility_results[fac_cols].sort_values("referrals_accepted", ascending=False)
         if "referrals_accepted" in fac_cols else facility_results[fac_cols]
     ).head(5)
-    return {
+    facts = {
         "settings": {k: _clean(v) for k, v in params.items()},
         "forecast_window": {
             "start": str(forecast_df["timestamp"].min()),
@@ -84,6 +134,16 @@ def build_memo_facts(
             {k: _clean(v) for k, v in r.items()} for r in facilities.to_dict("records")
         ],
     }
+    stage_cols = {"triage": "mean_triage_wait", "bed": "mean_bed_wait", "doctor": "mean_provider_wait"}
+    stages = {k: round(float(sim_df[c].fillna(0).mean()), 1)
+              for k, c in stage_cols.items() if c in sim_df.columns}
+    if stages:  # average of the hourly means, not patient-weighted
+        facts["avg_hourly_wait_by_stage_min"] = stages
+    for key, col in (("peak_doctor_utilization_pct", "mean_provider_utilization"),
+                     ("peak_nurse_utilization_pct", "mean_nurse_utilization")):
+        if col in sim_df.columns:
+            facts[key] = round(float(sim_df[col].fillna(0).max()) * 100, 1)
+    return facts
 
 
 # ------------------------------------------------------------------- template memo
@@ -99,6 +159,18 @@ def render_template_memo(facts: dict) -> str:
     peak_row = next((r for k, r in t.items() if k.startswith("Peak hourly")), {})
     triggered = facts["patients_diverted"] > 0
     fw = facts["forecast_window"]
+    stages = facts.get("avg_hourly_wait_by_stage_min")
+    stage_line, dominant_note = "", ""
+    if stages:
+        stage_line = (
+            f"\n- Average hourly mean wait by stage: triage {stages.get('triage', 'n/a')} min, "
+            f"bed {stages.get('bed', 'n/a')} min, doctor {stages.get('doctor', 'n/a')} min. "
+            f"Peak doctor utilization {facts.get('peak_doctor_utilization_pct', 'n/a')}%, "
+            f"peak triage-nurse utilization {facts.get('peak_nurse_utilization_pct', 'n/a')}%."
+        )
+        top = max(stages, key=stages.get)
+        if stages[top] > 0:
+            dominant_note = f" The longest average wait is at the {top} stage."
 
     if triggered:
         fac_lines = "\n".join(
@@ -117,7 +189,7 @@ def render_template_memo(facts: dict) -> str:
             f"{facts['peak_bed_utilization_pct']}% against a {s['trigger_pct']}% trigger. "
             "Baseline and diversion results are therefore identical, and this simulation does "
             "not show whether diversion helps. Any waits above target come from something "
-            "other than bed saturation, so review doctor and triage staffing and consider "
+            "other than bed saturation." + dominant_note + " Review doctor and triage staffing and consider "
             "a trigger based on queue length or wait time instead of bed occupancy."
         )
         diversion_note = " Diversion never activated, so both scenarios are the same run."
@@ -131,7 +203,7 @@ Simulation of {fw['start']} to {fw['end']} with {s['beds']} beds, {s['nurses']} 
 - Mean wait: {b['mean_wait_min']:.1f} min without diversion vs {w['mean_wait_min']:.1f} min with diversion. Reduction {_pct(wait_row.get('Result'))}, target {_pct(wait_row.get('Target'))}: {wait_row.get('Status', 'n/a')}.
 - Capacity-violation rate: {_pct(b['capacity_violation_rate'])} vs {_pct(w['capacity_violation_rate'])}. Reduction {_pct(viol_row.get('Result'))}, target {_pct(viol_row.get('Target'))}: {viol_row.get('Status', 'n/a')}.
 - Peak hourly mean wait with diversion: {w['peak_hourly_wait_min']:.1f} min (limit {peak_row.get('Target', 45):.0f} min: {peak_row.get('Status', 'n/a')}).
-- Peak bed utilization {facts['peak_bed_utilization_pct']}%; {facts['hours_at_diversion_threshold']} hours at or above the trigger; {facts['patients_diverted']} patients diverted (peak hour: {facts['peak_nonurgent_diversion_pct']}% of non-urgent arrivals).{diversion_note}
+- Peak bed utilization {facts['peak_bed_utilization_pct']}%; {facts['hours_at_diversion_threshold']} hours at or above the trigger; {facts['patients_diverted']} patients diverted (peak hour: {facts['peak_nonurgent_diversion_pct']}% of non-urgent arrivals).{diversion_note}{stage_line}
 
 ## Recommended actions
 {actions}
@@ -196,17 +268,28 @@ def generate_memo(
         return MemoResult(template, "template", "No API key set; used the built-in template.")
     try:
         if _client is None:
-            import anthropic  # optional dependency
-            _client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=0)
-        resp = _client.messages.create(
-            model=model,
-            max_tokens=900,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": build_llm_prompt(facts)}],
+            from google import genai  # pip install google-genai
+            from google.genai import types
+            _client = genai.Client(
+                api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout * 1000))
+            )
+        from_types = None
+        try:
+            from google.genai import types as from_types  # absent only in unit tests
+        except Exception:
+            pass
+        config = (
+            from_types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT, temperature=0.2, max_output_tokens=4096
+            )
+            if from_types else {"system_instruction": SYSTEM_PROMPT}
         )
-        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
-        if not text:
-            raise ValueError("empty response")
+        resp = _client.models.generate_content(
+            model=model, contents=build_llm_prompt(facts), config=config
+        )
+        text = (getattr(resp, "text", None) or "").strip()
+        if not text:  # blocked by safety filters, or empty
+            raise ValueError("empty or blocked response")
     except Exception as exc:  # network, auth, timeout, missing package: never break the tab
         return MemoResult(template, "template", f"LLM unavailable ({type(exc).__name__}); used template.")
     return MemoResult(text, "llm", "", find_unverified_numbers(text, facts))

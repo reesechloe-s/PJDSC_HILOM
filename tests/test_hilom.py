@@ -148,20 +148,26 @@ class MemoTests(unittest.TestCase):
 
     def test_llm_success_and_failure_paths(self):
         from memo import generate_memo
-        class Blk: type = "text"; text = "Mean wait 30.0 min; 999 patients."
-        class Resp: content = [Blk()]
+        class Resp: text = "Mean wait 30.0 min; 999 patients."
+        class Blocked: text = None
         class Ok:
-            class messages:
+            class models:
                 @staticmethod
-                def create(**kw): return Resp()
+                def generate_content(**kw): return Resp()
+        class Empty:
+            class models:
+                @staticmethod
+                def generate_content(**kw): return Blocked()
         class Boom:
-            class messages:
+            class models:
                 @staticmethod
-                def create(**kw): raise TimeoutError()
+                def generate_content(**kw): raise TimeoutError()
         ok = generate_memo(self._facts(), api_key="x", _client=Ok())
         self.assertEqual((ok.source, ok.unverified_numbers), ("llm", ["999"]))
         bad = generate_memo(self._facts(), api_key="x", _client=Boom())
         self.assertEqual(bad.source, "template"); self.assertIn("TimeoutError", bad.note)
+        blocked = generate_memo(self._facts(), api_key="x", _client=Empty())
+        self.assertEqual(blocked.source, "template"); self.assertIn("ValueError", blocked.note)
 
     def test_prompt_embeds_facts(self):
         from memo import build_llm_prompt
@@ -176,3 +182,61 @@ class MemoTests(unittest.TestCase):
         self.assertNotIn("Pre-alert", txt)
         self.assertNotIn("\n  ", txt.split("## Findings")[1].split("## Recommended")[0])  # no wrapped lines
         self.assertEqual(find_unverified_numbers(txt, f), [])
+
+
+class EnvAndStageTests(unittest.TestCase):
+    def test_read_env_key_variants(self):
+        import tempfile
+        from memo import read_env_key
+        cases = {
+            "GEMINI_API_KEY=abc123\n": "abc123",
+            "# c\nGEMINI_API_KEY = \"abc 1\"\n": "abc 1",
+            "export GEMINI_API_KEY='k2'  \n": "k2",
+            "OTHER=x\nGEMINI_API_KEY=k3 # note\n": "k3",
+            "\ufeffGEMINI_API_KEY=bom\n": "bom",
+            "GEMINI_API_KEY=\n": None,
+            "NOPE=1\n": None,
+        }
+        for text, want in cases.items():
+            with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False, encoding="utf-8") as f:
+                f.write(text)
+            self.assertEqual(read_env_key(f.name), want, text)
+        self.assertIsNone(read_env_key("/nonexistent/.env"))
+
+    def test_stage_breakdown_in_facts_and_memo(self):
+        from memo import build_memo_facts, render_template_memo, find_unverified_numbers
+        from kpis import compare_scenarios
+        b = {"mean_wait_min": 5.0, "peak_hourly_wait_min": 50.0, "capacity_violation_rate": 0.0}
+        sim = pd.DataFrame({"utilization": [0.3, 0.2], "saturated": [False, False], "divert_pct": [0.0, 0.0],
+                            "mean_triage_wait": [1.0, 2.0], "mean_bed_wait": [0.0, 0.0],
+                            "mean_provider_wait": [40.0, 60.0],
+                            "mean_provider_utilization": [0.9, 1.0], "mean_nurse_utilization": [0.2, 0.3]})
+        fac = pd.DataFrame({"facility_name": ["A"], "travel_time_mins": [10],
+                            "max_simultaneous_patients": [5], "referrals_accepted": [0]})
+        fc = pd.DataFrame({"timestamp": pd.to_datetime(["2023-12-23", "2023-12-24"]), "forecast": [5.0, 9.0]})
+        f = build_memo_facts({"beds": 70, "nurses": 13, "doctors": 4, "trigger_pct": 85},
+                             compare_scenarios(b, b), b, b, sim, fac, 0, fc)
+        self.assertEqual(f["avg_hourly_wait_by_stage_min"], {"triage": 1.5, "bed": 0.0, "doctor": 50.0})
+        self.assertEqual(f["peak_doctor_utilization_pct"], 100.0)
+        txt = render_template_memo(f)
+        self.assertIn("longest average wait is at the doctor stage", txt)
+        self.assertEqual(find_unverified_numbers(txt, f), [])
+
+
+class ApiKeyLookup(unittest.TestCase):
+    def test_priority_env_file_then_secrets_and_both_names(self):
+        import tempfile
+        from memo import get_api_key
+        saved = {k: os.environ.pop(k, None) for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY")}
+        try:
+            self.assertIsNone(get_api_key([], None))
+            with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+                f.write("GOOGLE_API_KEY=from_file\n")
+            self.assertEqual(get_api_key([f.name], {"GEMINI_API_KEY": "s"}), "from_file")
+            self.assertEqual(get_api_key(["/nope/.env"], {"GEMINI_API_KEY": "s"}), "s")
+            os.environ["GEMINI_API_KEY"] = "from_env"
+            self.assertEqual(get_api_key([f.name], {"GEMINI_API_KEY": "s"}), "from_env")
+        finally:
+            os.environ.pop("GEMINI_API_KEY", None)
+            for k, v in saved.items():
+                if v is not None: os.environ[k] = v

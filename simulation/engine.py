@@ -93,6 +93,15 @@ class _EmergencyDepartment:
         mu = np.log(mean) - sigma_squared / 2
         return float(self.rng.lognormal(mu, np.sqrt(sigma_squared)))
 
+    def _consult_fraction(self, acuity: str) -> float:
+        """Share of treatment time that needs a doctor. Drawn at arrival so the random
+        stream does not depend on queue state (common random numbers across scenarios)."""
+        if acuity == "emergent":
+            return float(self.rng.uniform(0.60, 0.85))
+        if acuity == "urgent":
+            return float(self.rng.uniform(0.30, 0.50))
+        return float(self.rng.uniform(0.10, 0.20))
+
     def _bed_pressure(self) -> float:
         return (self.beds.count + len(self.beds.queue)) / self.config.num_beds
 
@@ -135,7 +144,10 @@ class _EmergencyDepartment:
         acuity: str,
         triage_service: float,
         treatment_service: float,
+        consult_fraction: float | None = None,
     ):
+        if consult_fraction is None:  # backward compatible with direct callers/tests
+            consult_fraction = self._consult_fraction(acuity)
         arrival_time = float(self.env.now)
         record: dict[str, Any] = {
             "patient_id": patient_id,
@@ -224,14 +236,7 @@ class _EmergencyDepartment:
                 record["provider_wait"] = self.env.now - provider_request_time
                 
                 # Randomized provider consult time based on acuity
-                if acuity == "emergent":
-                    consult_pct = self.rng.uniform(0.60, 0.85)
-                elif acuity == "urgent":
-                    consult_pct = self.rng.uniform(0.30, 0.50)
-                else: 
-                    consult_pct = self.rng.uniform(0.10, 0.20)
-                
-                provider_consult_time = float(treatment_service * consult_pct)
+                provider_consult_time = float(treatment_service * consult_fraction)
                 yield self.env.timeout(provider_consult_time)
                     
             # Bed remains occupied for remaining treatment time
@@ -440,12 +445,14 @@ def run_simulation(
                 acuity = str(arrival_rng.choice(acuities, p=probabilities))
                 triage_service = ed._service_time(triage=True)
                 treatment_service = ed._service_time(triage=False)
+                consult_fraction = ed._consult_fraction(acuity)
                 env.process(
                     ed.patient_journey(
                         patient_id,
                         acuity,
                         triage_service,
                         treatment_service,
+                        consult_fraction,
                     )
                 )
                 patient_id += 1
@@ -490,4 +497,3 @@ def run_simulation(
         hourly=hourly,
         facilities=facility_results,
     )
-

@@ -11,9 +11,8 @@ from simulation.config import DEFAULT_CONFIG, SimulationConfig
 from simulation.engine import SimulationResult, run_simulation
 from facility_map import render_facility_map
 from kpis import compare_scenarios, hourly_dashboard_metrics, scenario_kpis
-from memo import build_memo_facts, generate_memo
+from memo import build_memo_facts, generate_memo, get_api_key
 from queueing_theory import mmc_table
-from memo import build_memo_facts, generate_memo
 
 PROJECT_DIR = Path(__file__).resolve().parent
 FACILITIES_PATH = PROJECT_DIR / "data" / "alternative_facilities.parquet"
@@ -38,14 +37,13 @@ def load_forecast() -> pd.DataFrame:
 
 
 def _get_api_key():
-    """Key from the environment or Streamlit secrets; None means 'use the template memo'."""
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        return key
+    """Gemini key from the environment, a .env file next to this script, or Streamlit secrets.
+    None means 'use the template memo'."""
     try:
-        return st.secrets.get("ANTHROPIC_API_KEY")
+        secrets = st.secrets
     except Exception:
-        return None
+        secrets = None
+    return get_api_key([PROJECT_DIR / ".env", Path.cwd() / ".env"], secrets)
 
 
 def _slider_default(value, lo, hi):
@@ -170,7 +168,7 @@ st.write("Edit the simultaneous capacity of nearby facilities. Set to 0 to disab
 edited_facilities = st.data_editor(
     facilities_raw,
     column_config={
-        "simultaneous_capacity": st.column_config.NumberColumn(
+        "max_simultaneous_patients": st.column_config.NumberColumn(
             "Capacity (Beds)",
             help="Maximum diverted patients they can handle at once",
             min_value=0,
@@ -292,6 +290,22 @@ with tab2:
     wait_fig.add_hline(y=wait_target, line_dash="dash")
     wait_fig.update_layout(xaxis_title="Time", yaxis_title="Mean wait (minutes)")
     st.plotly_chart(wait_fig, width="stretch")
+
+    st.markdown("**Where the waiting happens (with diversion)**")
+    u1, u2 = st.columns(2)
+    u1.metric("Peak doctor utilization", f"{sim_df['mean_provider_utilization'].fillna(0).max() * 100:.0f}%")
+    u2.metric("Peak triage-nurse utilization", f"{sim_df['mean_nurse_utilization'].fillna(0).max() * 100:.0f}%")
+    stage_fig = go.Figure()
+    for col, label in (
+        ("mean_triage_wait", "Triage"),
+        ("mean_bed_wait", "Bed"),
+        ("mean_provider_wait", "Doctor"),
+    ):
+        stage_fig.add_trace(
+            go.Scatter(x=sim_df["timestamp"], y=sim_df[col].fillna(0), name=label, stackgroup="wait")
+        )
+    stage_fig.update_layout(xaxis_title="Time", yaxis_title="Mean wait by stage (minutes)")
+    st.plotly_chart(stage_fig, width="stretch")
 
     utilization_fig = go.Figure(
         go.Scatter(
