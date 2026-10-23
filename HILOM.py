@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from simulation.config import DEFAULT_CONFIG, SimulationConfig
-from simulation.engine3 import SimulationResult, run_simulation
+from simulation.engine import SimulationResult, run_simulation
 from facility_map import render_facility_map
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -32,12 +32,12 @@ def load_forecast() -> pd.DataFrame:
 
 
 def _dashboard_metrics(
-    result: SimulationResult, diversion_threshold: float
+    result: SimulationResult, max_occupancy: float
 ) -> pd.DataFrame:
     hourly = result.hourly.copy()
     hourly["utilization"] = hourly["mean_bed_utilization"].fillna(0.0)
     hourly["wait_min"] = hourly["mean_total_wait"].fillna(0.0)
-    hourly["saturated"] = hourly["utilization"] >= diversion_threshold
+    hourly["saturated"] = hourly["utilization"] >= max_occupancy
     hourly["divert_pct"] = 0.0
 
     if not result.patients.empty:
@@ -63,9 +63,9 @@ def run_dashboard_simulations(
     beds: int,
     nurses: int,
     doctors: int,
-    diversion_threshold: float,
+    max_occupancy: float,
     wait_target: float,
-    abandonment_limit: float,
+    max_wait_tolerance: float,
     triage_min: float,
     triage_max: float,
     treatment_mean: float,
@@ -75,9 +75,9 @@ def run_dashboard_simulations(
         num_beds=beds,
         num_nurses=nurses,
         num_doctors=doctors,
-        diversion_occupancy_threshold=None,
+        max_occupancy_before_diversion=None,
         wait_target_minutes=wait_target,
-        abandonment_limit_minutes=abandonment_limit,
+        max_wait_tolerance=max_wait_tolerance,
         triage_min_minutes=triage_min,
         triage_max_minutes=triage_max,
         treatment_mean_minutes=treatment_mean,
@@ -88,9 +88,9 @@ def run_dashboard_simulations(
         num_beds=beds,
         num_nurses=nurses,
         num_doctors=doctors,
-        diversion_occupancy_threshold=diversion_threshold,
+        max_occupancy_before_diversion=max_occupancy,
         wait_target_minutes=wait_target,
-        abandonment_limit_minutes=abandonment_limit,
+        max_wait_tolerance=max_wait_tolerance,
         triage_min_minutes=triage_min,
         triage_max_minutes=triage_max,
         treatment_mean_minutes=treatment_mean,
@@ -121,13 +121,13 @@ doctors = st.sidebar.slider(
 )
 
 # Thresholds & Limits
-threshold_pct = st.sidebar.slider(
-    "Diversion threshold (% of capacity)", 
+trigger_pct = st.sidebar.slider(
+    "Redirection Trigger (% of capacity reached)", 
     min_value=50, 
     max_value=100, 
-    value=int((DEFAULT_CONFIG.diversion_occupancy_threshold or 0.85) * 100)
+    value=int((DEFAULT_CONFIG.max_occupancy_before_diversion or 0.85) * 100)
 )
-diversion_threshold = threshold_pct / 100.0
+max_occupancy = trigger_pct / 100.0
 
 wait_target = st.sidebar.slider(
     "Wait-time target (minutes)", 
@@ -135,11 +135,11 @@ wait_target = st.sidebar.slider(
     max_value=120, 
     value=int(DEFAULT_CONFIG.wait_target_minutes)
 )
-abandonment_limit = st.sidebar.slider(
-    "Abandonment limit (minutes)", 
+max_wait_tolerance = st.sidebar.slider(
+    "Walkout time limit (minutes)", 
     min_value=30, 
     max_value=1440, 
-    value=int(DEFAULT_CONFIG.abandonment_limit_minutes)
+    value=int(DEFAULT_CONFIG.max_wait_tolerance)
 )
 
 # Service Times
@@ -190,16 +190,16 @@ baseline_result, diversion_result = run_dashboard_simulations(
     beds,
     nurses,
     doctors,
-    diversion_threshold,
+    max_occupancy,
     wait_target,
-    abandonment_limit,
+    max_wait_tolerance,
     triage_min,
     triage_max,
     treatment_mean,
 )
 
-baseline_df = _dashboard_metrics(baseline_result, diversion_threshold)
-sim_df = _dashboard_metrics(diversion_result, diversion_threshold)
+baseline_df = _dashboard_metrics(baseline_result, max_occupancy)
+sim_df = _dashboard_metrics(diversion_result, max_occupancy)
 facility_results = edited_facilities.merge(
     diversion_result.facilities[
         ["facility_id", "referrals_accepted"]
@@ -283,7 +283,7 @@ with tab2:
             name="Bed utilization",
         )
     )
-    utilization_fig.add_hline(y=threshold_pct, line_dash="dash")
+    utilization_fig.add_hline(y=trigger_pct, line_dash="dash")
     utilization_fig.update_layout(
         xaxis_title="Time", yaxis_title="Sampled bed utilization (%)"
     )

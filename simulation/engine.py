@@ -158,9 +158,12 @@ class _EmergencyDepartment:
         }
         self.patient_records.append(record)
 
-        # Added patient reneging logic to prevent infinite queues
+        # Dynamic max wait tolerance before patient walks out (Left Without Being Seen)
+        walkout_timeout = self.config.max_wait_tolerance
+
+        # Triage Queue
         with self.triage_nurses.request() as nurse_request:
-            triage_results = yield nurse_request | self.env.timeout(360.0) # 6 hours max wait
+            triage_results = yield nurse_request | self.env.timeout(walkout_timeout)
             
             if nurse_request not in triage_results:
                 record["status"] = "left_without_being_seen"
@@ -172,11 +175,12 @@ class _EmergencyDepartment:
             record["triage_wait"] = self.env.now - arrival_time
             yield self.env.timeout(triage_service)
 
-        threshold = self.config.diversion_occupancy_threshold
+        # Diversion check using max_occupancy_before_diversion
+        max_occupancy = self.config.max_occupancy_before_diversion
         if (
             acuity == "non-urgent"
-            and threshold is not None
-            and self._bed_pressure() >= threshold
+            and max_occupancy is not None
+            and self._bed_pressure() >= max_occupancy
         ):
             accepted = yield from self._attempt_diversion(record)
             if accepted:
@@ -186,9 +190,10 @@ class _EmergencyDepartment:
         priority = ACUITY_PRIORITY[acuity]
         bed_request_time = self.env.now
         
+        # Bed Queue
         with self.beds.request(priority=priority) as bed_request:
-            # Added patient reneging for bed wait
-            bed_results = yield bed_request | self.env.timeout(360.0)
+            remaining_tolerance = max(0.0, walkout_timeout - record["triage_wait"])
+            bed_results = yield bed_request | self.env.timeout(remaining_tolerance)
             
             if bed_request not in bed_results:
                 record["status"] = "left_without_being_seen"
@@ -204,11 +209,18 @@ class _EmergencyDepartment:
                 yield provider_request
                 record["provider_wait"] = self.env.now - provider_request_time
                 
-                # Providers only spend a fraction of treatment time with the patient
-                provider_consult_time = min(15.0, treatment_service * 0.3)
-                yield self.env.timeout(provider_consult_time)
+                # Randomized provider consult time based on acuity
+                if acuity == "emergent":
+                    consult_pct = self.rng.uniform(0.60, 0.85)
+                elif acuity == "urgent":
+                    consult_pct = self.rng.uniform(0.30, 0.50)
+                else: 
+                    consult_pct = self.rng.uniform(0.10, 0.20)
                 
-            # Bed remains occupied for the rest of the treatment time
+                provider_consult_time = float(treatment_service * consult_pct)
+                yield self.env.timeout(provider_consult_time)
+                    
+            # Bed remains occupied for remaining treatment time
             remaining_treatment_time = treatment_service - provider_consult_time
             if remaining_treatment_time > 0:
                 yield self.env.timeout(remaining_treatment_time)
@@ -307,7 +319,10 @@ def _hourly_results(
         "arrival_count",
         "treated_count",
         "diverted_count",
-        "lwbs_count", # Added tracker for left without being seen
+        "lwbs_count",
+        "emergent_count",
+        "urgent_count",
+        "non_urgent_count",
         "diversion_offered_count",
         "diversion_rejected_count",
         "wait_target_exceeded_count",
@@ -339,6 +354,9 @@ def _hourly_results(
             hourly.loc[hour, "lwbs_count"] = int(
                 (group["status"] == "left_without_being_seen").sum()
             )
+            hourly.loc[hour, "emergent_count"] = int((group["acuity"] == "emergent").sum())
+            hourly.loc[hour, "urgent_count"] = int((group["acuity"] == "urgent").sum())
+            hourly.loc[hour, "non_urgent_count"] = int((group["acuity"] == "non-urgent").sum())
             hourly.loc[hour, "diversion_offered_count"] = int(
                 group["diversion_offered"].sum()
             )
@@ -381,12 +399,7 @@ def run_simulation(
     facilities: pd.DataFrame | None = None,
     seed: int = 42,
 ) -> SimulationResult:
-    """Simulate arrivals, ED queues, and optional diversion from hourly forecasts.
-
-    Treatment durations follow a lognormal distribution parameterized by the
-    configured arithmetic mean and standard deviation. These remain scenario
-    assumptions until calibrated against operational patient-level data.
-    """
+    """Simulate arrivals, ED queues, and optional diversion from hourly forecasts."""
     config = config or SimulationConfig()
     _validate_config(config)
     forecast = _validate_forecast(forecast_df)
