@@ -394,7 +394,7 @@ with tab4:
         st.session_state["memo_sig"] = facts_sig
 
     st.session_state.setdefault("memo_text", "")
-    if st.session_state.get("memo_source") == "template":
+    if st.session_state.get("memo_note") or st.session_state.get("memo_source") == "template":
         st.info(st.session_state.get("memo_note") or "Template draft.")
     if st.session_state.get("memo_unverified"):
         st.warning(

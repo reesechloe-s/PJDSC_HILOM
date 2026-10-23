@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +22,8 @@ import pandas as pd
 # Model name from Google's current Gemini quickstart; override with HILOM_LLM_MODEL if AI Studio
 # lists a different one for your key.
 DEFAULT_MODEL = os.environ.get("HILOM_LLM_MODEL", "gemini-3.7-flash")
+FALLBACK_MODEL = os.environ.get("HILOM_LLM_FALLBACK_MODEL", "gemini-2.5-flash")
+RETRY_DELAY_S = 1.0
 API_KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")  # AI Studio keys use either name
 LLM_TIMEOUT_S = 10.0  # proposal target: memo within 10 seconds
 
@@ -256,6 +259,18 @@ def build_llm_prompt(facts: dict) -> str:
     )
 
 
+def _is_transient(exc: Exception) -> bool:
+    """Google-side overload/rate limit: worth one retry on the same model."""
+    return getattr(exc, "code", None) in (429, 500, 502, 503, 504) or type(exc).__name__ == "ServerError"
+
+
+def _describe(exc: Exception, api_key: str | None) -> str:
+    msg = " ".join(str(exc).split())[:220]
+    if api_key:
+        msg = msg.replace(api_key, "***")
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+
+
 def generate_memo(
     facts: dict,
     api_key: str | None = None,
@@ -263,9 +278,13 @@ def generate_memo(
     timeout: float = LLM_TIMEOUT_S,
     _client=None,
 ) -> MemoResult:
+    """LLM memo if possible, else the template. Per model: one retry on 5xx/429. If the
+    primary model fails, the fallback model is tried. Never raises."""
     template = render_template_memo(facts)
     if _client is None and not api_key:
         return MemoResult(template, "template", "No API key set; used the built-in template.")
+
+    types = None
     try:
         if _client is None:
             from google import genai  # pip install google-genai
@@ -273,23 +292,35 @@ def generate_memo(
             _client = genai.Client(
                 api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout * 1000))
             )
-        from_types = None
-        try:
-            from google.genai import types as from_types  # absent only in unit tests
-        except Exception:
-            pass
-        config = (
-            from_types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT, temperature=0.2, max_output_tokens=4096
-            )
-            if from_types else {"system_instruction": SYSTEM_PROMPT}
-        )
-        resp = _client.models.generate_content(
-            model=model, contents=build_llm_prompt(facts), config=config
-        )
-        text = (getattr(resp, "text", None) or "").strip()
-        if not text:  # blocked by safety filters, or empty
-            raise ValueError("empty or blocked response")
-    except Exception as exc:  # network, auth, timeout, missing package: never break the tab
-        return MemoResult(template, "template", f"LLM unavailable ({type(exc).__name__}); used template.")
-    return MemoResult(text, "llm", "", find_unverified_numbers(text, facts))
+        else:
+            try:
+                from google.genai import types  # not needed for stand-in clients in tests
+            except Exception:
+                types = None
+    except Exception as exc:  # package missing or client construction failed
+        return MemoResult(template, "template", f"LLM unavailable ({_describe(exc, api_key)}); used template.")
+
+    config = (
+        types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.2,
+                                    max_output_tokens=4096)
+        if types else {"system_instruction": SYSTEM_PROMPT}
+    )
+    prompt = build_llm_prompt(facts)
+    models = [model] + ([FALLBACK_MODEL] if FALLBACK_MODEL and FALLBACK_MODEL != model else [])
+    last: Exception | None = None
+    for name in models:
+        for attempt in range(2):
+            try:
+                resp = _client.models.generate_content(model=name, contents=prompt, config=config)
+                text = (getattr(resp, "text", None) or "").strip()
+                if not text:  # blocked by safety filters, or empty
+                    raise ValueError("empty or blocked response")
+                note = "" if name == model else f"Primary model {model} failed; used {name}."
+                return MemoResult(text, "llm", note, find_unverified_numbers(text, facts))
+            except Exception as exc:  # network, auth, timeout, overload: never break the tab
+                last = exc
+                if attempt == 0 and _is_transient(exc):
+                    time.sleep(RETRY_DELAY_S)
+                    continue
+                break
+    return MemoResult(template, "template", f"LLM unavailable ({_describe(last, api_key)}); used template.")

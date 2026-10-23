@@ -240,3 +240,46 @@ class ApiKeyLookup(unittest.TestCase):
             os.environ.pop("GEMINI_API_KEY", None)
             for k, v in saved.items():
                 if v is not None: os.environ[k] = v
+
+
+class LlmResilience(unittest.TestCase):
+    def setUp(self):
+        import memo
+        memo.RETRY_DELAY_S = 0.0
+        self.memo = memo
+        self.facts = MemoTests()._facts()
+
+    def _client(self, behaviours):
+        calls = []
+        class R:  # response
+            def __init__(s, text): s.text = text
+        class C:
+            class models:
+                @staticmethod
+                def generate_content(model, contents, config):
+                    calls.append(model)
+                    b = behaviours.pop(0)
+                    if isinstance(b, Exception): raise b
+                    return R(b)
+        return C(), calls
+
+    def test_retries_once_on_5xx_then_succeeds(self):
+        class ServerError(Exception): code = 503
+        c, calls = self._client([ServerError("503 UNAVAILABLE overloaded"), "Mean wait 3.9 min"])
+        r = self.memo.generate_memo(self.facts, api_key="k", model="primary", _client=c)
+        self.assertEqual((r.source, calls, r.note), ("llm", ["primary", "primary"], ""))
+
+    def test_falls_back_to_second_model_and_says_so(self):
+        class ClientError(Exception): code = 404
+        c, calls = self._client([ClientError("404 NOT_FOUND model"), "Wait 30.0 min"])
+        r = self.memo.generate_memo(self.facts, api_key="k", model="bad-name", _client=c)
+        self.assertEqual(r.source, "llm"); self.assertEqual(calls[0], "bad-name")
+        self.assertNotEqual(calls[1], "bad-name"); self.assertIn("used", r.note)
+
+    def test_error_message_shown_and_key_redacted(self):
+        class ServerError(Exception): code = 503
+        e = ServerError("503 UNAVAILABLE key=SECRET123 overloaded")
+        c, _ = self._client([e, e, e, e])
+        r = self.memo.generate_memo(self.facts, api_key="SECRET123", model="p", _client=c)
+        self.assertEqual(r.source, "template")
+        self.assertIn("503 UNAVAILABLE", r.note); self.assertNotIn("SECRET123", r.note)
