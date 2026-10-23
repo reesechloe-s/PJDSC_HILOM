@@ -9,7 +9,7 @@ from simulation.config import DEFAULT_CONFIG, SimulationConfig
 from simulation.engine import SimulationResult, run_simulation
 from facility_map import render_facility_map
 from kpis import compare_scenarios, hourly_dashboard_metrics, scenario_kpis
-from queueing_tehroy import mmc_table
+from queueing_theory import mmc_table
 
 PROJECT_DIR = Path(__file__).resolve().parent
 FACILITIES_PATH = PROJECT_DIR / "data" / "alternative_facilities.parquet"
