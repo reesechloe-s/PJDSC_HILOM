@@ -5,5 +5,5 @@ plotly
 numpy
 simpy
 pydeck
-anthropic  # optional: enables LLM-written memos (else a template is used)
-# statsmodels is only needed in the Colab/forecasting notebook, not the deployed app
+google-genai
+python-dotenv
