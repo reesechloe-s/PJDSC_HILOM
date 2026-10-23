@@ -1,6 +1,9 @@
-streamlit
+streamlit>=1.50   # width="stretch" on st.dataframe / st.plotly_chart needs a recent release
 pandas
 pyarrow
 plotly
 numpy
 simpy
+pydeck
+anthropic  # optional: enables LLM-written memos (else a template is used)
+# statsmodels is only needed in the Colab/forecasting notebook, not the deployed app
