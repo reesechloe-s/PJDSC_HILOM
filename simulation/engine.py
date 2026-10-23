@@ -206,7 +206,21 @@ class _EmergencyDepartment:
 
             provider_request_time = self.env.now
             with self.providers.request(priority=priority) as provider_request:
-                yield provider_request
+                # Calculate remaining tolerance after triage and bed waits
+                time_already_waited = record["triage_wait"] + record["bed_wait"]
+                remaining_tolerance = max(0.0, walkout_timeout - time_already_waited)
+                
+                provider_results = yield provider_request | self.env.timeout(remaining_tolerance)
+                
+                if provider_request not in provider_results:
+                    record["status"] = "left_without_being_seen"
+                    record["provider_wait"] = self.env.now - provider_request_time
+                    record["total_wait"] = (
+                        record["triage_wait"] + record["bed_wait"] + record["provider_wait"]
+                    )
+                    record["time_in_system"] = self.env.now - arrival_time
+                    return
+                
                 record["provider_wait"] = self.env.now - provider_request_time
                 
                 # Randomized provider consult time based on acuity
@@ -476,3 +490,4 @@ def run_simulation(
         hourly=hourly,
         facilities=facility_results,
     )
+
