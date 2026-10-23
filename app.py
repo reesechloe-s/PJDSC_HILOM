@@ -7,6 +7,7 @@ import streamlit as st
 
 from simulation.config import DEFAULT_CONFIG, SimulationConfig
 from simulation.engine3 import SimulationResult, run_simulation
+from facility_map import render_facility_map
 
 PROJECT_DIR = Path(__file__).resolve().parent
 FACILITIES_PATH = PROJECT_DIR / "data" / "alternative_facilities.parquet"
@@ -223,8 +224,7 @@ with tab3:
         f"{int(diversion_result.patients['diversion_accepted'].sum())}",
     )
     st.write("Alternative facilities and accepted referrals")
-    st.map(facility_results, latitude="lat", longitude="lon")
-    st.dataframe(facility_results, width="stretch")
+    render_facility_map(facility_results)
 
 with tab4:
     st.subheader("Draft policy memo")
