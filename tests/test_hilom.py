@@ -166,3 +166,13 @@ class MemoTests(unittest.TestCase):
     def test_prompt_embeds_facts(self):
         from memo import build_llm_prompt
         self.assertIn('"beds": 70', build_llm_prompt(self._facts()))
+
+    def test_template_says_so_when_diversion_never_triggered(self):
+        from memo import render_template_memo, find_unverified_numbers
+        f = self._facts(); f["patients_diverted"] = 0; f["hours_at_diversion_threshold"] = 0
+        txt = render_template_memo(f)
+        self.assertIn("Diversion was not triggered", txt)
+        self.assertIn("identical", txt)
+        self.assertNotIn("Pre-alert", txt)
+        self.assertNotIn("\n  ", txt.split("## Findings")[1].split("## Recommended")[0])  # no wrapped lines
+        self.assertEqual(find_unverified_numbers(txt, f), [])

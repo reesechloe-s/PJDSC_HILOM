@@ -97,41 +97,47 @@ def render_template_memo(facts: dict) -> str:
     wait_row = t.get("Mean wait reduction vs baseline", {})
     viol_row = t.get("Capacity-violation reduction vs baseline", {})
     peak_row = next((r for k, r in t.items() if k.startswith("Peak hourly")), {})
-    fac_lines = "\n".join(
-        f"- {f.get('facility_name', '?')}: {f.get('referrals_accepted', 0)} referrals "
-        f"accepted, {f.get('travel_time_mins', '?')} min travel"
-        for f in facts["top_receiving_facilities"]
-    ) or "- No facility data available."
+    triggered = facts["patients_diverted"] > 0
+    fw = facts["forecast_window"]
+
+    if triggered:
+        fac_lines = "\n".join(
+            f"- {f.get('facility_name', '?')}: {f.get('referrals_accepted', 0)} referrals "
+            f"accepted, {f.get('travel_time_mins', '?')} min travel"
+            for f in facts["top_receiving_facilities"]
+        ) or "- No facility data available."
+        actions = (
+            "Pre-alert the receiving facilities below before forecast peaks and review the "
+            "trigger level with clinical leads.\n" + fac_lines
+        )
+        diversion_note = ""
+    else:
+        actions = (
+            f"Diversion was not triggered under these settings: peak bed utilization was "
+            f"{facts['peak_bed_utilization_pct']}% against a {s['trigger_pct']}% trigger. "
+            "Baseline and diversion results are therefore identical, and this simulation does "
+            "not show whether diversion helps. Any waits above target come from something "
+            "other than bed saturation, so review doctor and triage staffing and consider "
+            "a trigger based on queue length or wait time instead of bed occupancy."
+        )
+        diversion_note = " Diversion never activated, so both scenarios are the same run."
+
     return f"""# DRAFT: ED Load-Balancing Protocol Memo (for human review)
 
 ## Summary
-Simulation of {facts['forecast_window']['start']} to {facts['forecast_window']['end']} with
-{s['beds']} beds, {s['nurses']} triage nurses and {s['doctors']} doctors. Diversion of
-non-urgent patients starts at {s['trigger_pct']}% bed occupancy. Peak forecast demand is
-{facts['forecast_window']['peak_forecast_arrivals_per_hour']} arrivals/hour.
+Simulation of {fw['start']} to {fw['end']} with {s['beds']} beds, {s['nurses']} triage nurses and {s['doctors']} doctors. Diversion of non-urgent patients starts at {s['trigger_pct']}% bed occupancy. Peak forecast demand is {fw['peak_forecast_arrivals_per_hour']} arrivals/hour.
 
 ## Findings
-- Mean wait: {b['mean_wait_min']:.1f} min without diversion vs {w['mean_wait_min']:.1f} min
-  with diversion (reduction {_pct(wait_row.get('Result'))}; target
-  {_pct(wait_row.get('Target'))}: {wait_row.get('Status', 'n/a')}).
-- Capacity-violation rate: {_pct(b['capacity_violation_rate'])} vs
-  {_pct(w['capacity_violation_rate'])} (reduction {_pct(viol_row.get('Result'))}; target
-  {_pct(viol_row.get('Target'))}: {viol_row.get('Status', 'n/a')}).
-- Peak hourly mean wait with diversion: {w['peak_hourly_wait_min']:.1f} min
-  (limit {peak_row.get('Target', 45):.0f} min: {peak_row.get('Status', 'n/a')}).
-- Peak bed utilization {facts['peak_bed_utilization_pct']}%; {facts['hours_at_diversion_threshold']}
-  hours at or above the trigger. {facts['patients_diverted']} patients diverted, up to
-  {facts['peak_nonurgent_diversion_pct']}% of non-urgent arrivals in the peak hour.
+- Mean wait: {b['mean_wait_min']:.1f} min without diversion vs {w['mean_wait_min']:.1f} min with diversion. Reduction {_pct(wait_row.get('Result'))}, target {_pct(wait_row.get('Target'))}: {wait_row.get('Status', 'n/a')}.
+- Capacity-violation rate: {_pct(b['capacity_violation_rate'])} vs {_pct(w['capacity_violation_rate'])}. Reduction {_pct(viol_row.get('Result'))}, target {_pct(viol_row.get('Target'))}: {viol_row.get('Status', 'n/a')}.
+- Peak hourly mean wait with diversion: {w['peak_hourly_wait_min']:.1f} min (limit {peak_row.get('Target', 45):.0f} min: {peak_row.get('Status', 'n/a')}).
+- Peak bed utilization {facts['peak_bed_utilization_pct']}%; {facts['hours_at_diversion_threshold']} hours at or above the trigger; {facts['patients_diverted']} patients diverted (peak hour: {facts['peak_nonurgent_diversion_pct']}% of non-urgent arrivals).{diversion_note}
 
 ## Recommended actions
-Pre-alert the receiving facilities below before forecast peaks and review the trigger level
-with clinical leads.
-{fac_lines}
+{actions}
 
 ## Limitations
-Results come from a simulation on synthetic data and one random seed. High-acuity and
-resuscitation cases are excluded from diversion. This is decision support only and does not
-replace clinical judgement or hospital protocols. A human must review before any use.
+Results come from a simulation on synthetic data and one random seed. High-acuity and resuscitation cases are excluded from diversion. This is decision support only and does not replace clinical judgement or hospital protocols. A human must review before any use.
 """
 
 
