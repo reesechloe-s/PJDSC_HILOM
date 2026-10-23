@@ -112,3 +112,57 @@ class DashboardMetrics(unittest.TestCase):
         h = pd.DataFrame({"mean_bed_utilization": [.5], "mean_total_wait": [1.0]})
         p = pd.DataFrame({"arrival_time": [9999], "acuity": ["non-urgent"], "diversion_accepted": [True]})
         self.assertEqual(hourly_dashboard_metrics(h, p, .85)["divert_pct"][0], 0.0)
+
+
+class MemoTests(unittest.TestCase):
+    def _facts(self):
+        from memo import build_memo_facts
+        from kpis import compare_scenarios
+        b = {"mean_wait_min": 60.0, "peak_hourly_wait_min": 90.0, "capacity_violation_rate": 0.2}
+        o = {"mean_wait_min": 30.0, "peak_hourly_wait_min": 40.0, "capacity_violation_rate": 0.1}
+        sim = pd.DataFrame({"utilization": [0.5, 0.97], "saturated": [False, True],
+                            "divert_pct": [0.0, 45.5]})
+        fac = pd.DataFrame({"facility_name": ["A", "B"], "travel_time_mins": [12, 20],
+                            "simultaneous_capacity": [5, 8], "referrals_accepted": [7, 3]})
+        fc = pd.DataFrame({"timestamp": pd.to_datetime(["2026-10-23", "2026-10-30"]),
+                           "forecast": [10.0, 24.4]})
+        params = {"beds": 70, "nurses": 13, "doctors": 4, "trigger_pct": 85}
+        return build_memo_facts(params, compare_scenarios(b, o), b, o, sim, fac, 10, fc)
+
+    def test_template_contains_verified_numbers_and_caveats(self):
+        from memo import render_template_memo, find_unverified_numbers
+        f = self._facts(); t = render_template_memo(f)
+        for needle in ("70 beds", "60.0", "30.0", "PASS", "human must review", "24.4"):
+            self.assertIn(needle, t)
+        self.assertEqual(find_unverified_numbers(t, f), [])
+
+    def test_guard_flags_invented_number(self):
+        from memo import find_unverified_numbers
+        f = self._facts()
+        self.assertEqual(find_unverified_numbers("Wait fell to 30.0 min, saving 123 beds", f), ["123"])
+
+    def test_no_key_uses_template(self):
+        from memo import generate_memo
+        r = generate_memo(self._facts(), api_key=None)
+        self.assertEqual(r.source, "template"); self.assertIn("No API key", r.note)
+
+    def test_llm_success_and_failure_paths(self):
+        from memo import generate_memo
+        class Blk: type = "text"; text = "Mean wait 30.0 min; 999 patients."
+        class Resp: content = [Blk()]
+        class Ok:
+            class messages:
+                @staticmethod
+                def create(**kw): return Resp()
+        class Boom:
+            class messages:
+                @staticmethod
+                def create(**kw): raise TimeoutError()
+        ok = generate_memo(self._facts(), api_key="x", _client=Ok())
+        self.assertEqual((ok.source, ok.unverified_numbers), ("llm", ["999"]))
+        bad = generate_memo(self._facts(), api_key="x", _client=Boom())
+        self.assertEqual(bad.source, "template"); self.assertIn("TimeoutError", bad.note)
+
+    def test_prompt_embeds_facts(self):
+        from memo import build_llm_prompt
+        self.assertIn('"beds": 70', build_llm_prompt(self._facts()))
