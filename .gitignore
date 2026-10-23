@@ -3,3 +3,5 @@
 artifacts/forecasting/sarimax_historical_demo.pkl
 __pycache__/
 *.pyc
+.venv/
+.streamlit/secrets.toml
