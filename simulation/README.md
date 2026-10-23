@@ -10,7 +10,7 @@ Install the repository-root dependencies and run:
 ```powershell
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python -m streamlit run app.py
+python -m streamlit run HILOM.py
 ```
 
 The dashboard compares a no-diversion baseline with an adjustable bed-pressure
