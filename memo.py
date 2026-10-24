@@ -19,14 +19,14 @@ from pathlib import Path
 
 import pandas as pd
 
-# Model name from Google's current Gemini quickstart; override with HILOM_LLM_MODEL if AI Studio
-# lists a different one for your key.
-# Replace lines 20-22 in memo.py with this:
-DEFAULT_MODEL = os.environ.get("HILOM_LLM_MODEL", "gemini-3.8-flash")
-FALLBACK_MODEL = os.environ.get("HILOM_LLM_FALLBACK_MODEL", "gemini-3.8-flash")
+from groq import Groq
+
+# Update these lines near the top of your memo file:
+DEFAULT_MODEL = os.environ.get("GROQ_LLM_MODEL", "qwen/qwen3.8-27b")
+FALLBACK_MODEL = os.environ.get("GROQ_LLM_FALLBACK_MODEL", "qwen/qwen3.8-27b")
 RETRY_DELAY_S = 1.0
-API_KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")  # AI Studio keys use either name
-LLM_TIMEOUT_S = 30.0  # proposal target: memo within 10 seconds
+API_KEY_NAMES = ("GROQ_API_KEY",)
+LLM_TIMEOUT_S = 30.0
 
 SYSTEM_PROMPT = (
     "You draft internal triage-protocol memoranda for hospital administrators and local "
@@ -47,7 +47,7 @@ class MemoResult:
     unverified_numbers: list = field(default_factory=list)
 
 
-def read_env_key(path, name: str = "GEMINI_API_KEY") -> str | None:
+def read_env_key(path, name: str = "GROQ_API_KEY") -> str | None:
     """Read NAME from a .env file without extra dependencies. Streamlit does not load .env itself.
     Handles a Windows BOM, `export NAME=...`, quotes and trailing comments."""
     try:
@@ -261,8 +261,12 @@ def build_llm_prompt(facts: dict) -> str:
 
 
 def _is_transient(exc: Exception) -> bool:
-    """Google-side overload/rate limit: worth one retry on the same model."""
-    return getattr(exc, "code", None) in (429, 500, 502, 503, 504) or type(exc).__name__ == "ServerError"
+    """API overload/rate limit: worth one retry on the same model."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    err_name = type(exc).__name__
+    return status in (429, 500, 502, 503, 504) or err_name in (
+        "ServerError", "RateLimitError", "InternalServerError", "APIStatusError", "APIConnectionError"
+    )
 
 
 def _describe(exc: Exception, api_key: str | None) -> str:
@@ -279,49 +283,44 @@ def generate_memo(
     timeout: float = LLM_TIMEOUT_S,
     _client=None,
 ) -> MemoResult:
-    """LLM memo if possible, else the template. Per model: one retry on 5xx/429. If the
+    """Groq LLM memo if possible, else the template. Per model: one retry on 5xx/429. If the
     primary model fails, the fallback model is tried. Never raises."""
     template = render_template_memo(facts)
     if _client is None and not api_key:
         return MemoResult(template, "template", "No API key set; used the built-in template.")
 
-    types = None
     try:
         if _client is None:
-            from google import genai  # pip install google-genai
-            from google.genai import types
-            _client = genai.Client(
-                api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout * 1000))
-            )
-        else:
-            try:
-                from google.genai import types  # not needed for stand-in clients in tests
-            except Exception:
-                types = None
-    except Exception as exc:  # package missing or client construction failed
+            _client = Groq(api_key=api_key, timeout=timeout)
+    except Exception as exc:
         return MemoResult(template, "template", f"LLM unavailable ({_describe(exc, api_key)}); used template.")
 
-    config = (
-        types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.2,
-                                    max_output_tokens=4096)
-        if types else {"system_instruction": SYSTEM_PROMPT}
-    )
     prompt = build_llm_prompt(facts)
     models = [model] + ([FALLBACK_MODEL] if FALLBACK_MODEL and FALLBACK_MODEL != model else [])
     last: Exception | None = None
+    
     for name in models:
         for attempt in range(2):
             try:
-                resp = _client.models.generate_content(model=name, contents=prompt, config=config)
-                text = (getattr(resp, "text", None) or "").strip()
-                if not text:  # blocked by safety filters, or empty
+                chat_completion = _client.chat.completions.create(
+                    model=name,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.2,
+                    max_completion_tokens=4096,
+                )
+                text = (chat_completion.choices[0].message.content or "").strip()
+                if not text:
                     raise ValueError("empty or blocked response")
                 note = "" if name == model else f"Primary model {model} failed; used {name}."
                 return MemoResult(text, "llm", note, find_unverified_numbers(text, facts))
-            except Exception as exc:  # network, auth, timeout, overload: never break the tab
+            except Exception as exc:
                 last = exc
                 if attempt == 0 and _is_transient(exc):
                     time.sleep(RETRY_DELAY_S)
                     continue
                 break
+                
     return MemoResult(template, "template", f"LLM unavailable ({_describe(last, api_key)}); used template.")

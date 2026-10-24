@@ -91,7 +91,7 @@ def load_forecast() -> pd.DataFrame:
 
 
 def _get_api_key():
-    """Gemini key from environment, .env file, or Streamlit secrets."""
+    """Groq key from environment, .env file, or Streamlit secrets."""
     try:
         secrets = st.secrets
     except Exception:
@@ -484,7 +484,7 @@ with tab4:
     ).hexdigest()
 
     if st.button("Generate memo"):
-        with st.spinner("Drafting memo via Gemini..."):
+        with st.spinner("Drafting memo via Groq..."):
             result = generate_memo(memo_facts, api_key=_get_api_key())
         st.session_state["memo_text"] = result.text
         st.session_state["memo_source"] = result.source

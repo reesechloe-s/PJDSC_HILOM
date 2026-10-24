@@ -5,5 +5,5 @@ plotly
 numpy
 simpy
 pydeck
-google-genai
-python-dotenv
+groq
+scipy
