@@ -111,6 +111,7 @@ def run_dashboard_simulations(
     nurses: int,
     doctors: int,
     max_occupancy: float,
+    provider_threshold: float,  # I added this, Neil.
     wait_target: float,
     max_wait_tolerance: float,
     triage_min: float,
@@ -136,6 +137,7 @@ def run_dashboard_simulations(
         num_nurses=nurses,
         num_doctors=doctors,
         max_occupancy_before_diversion=max_occupancy,
+        provider_queue_threshold=provider_threshold, # also this.
         wait_target_minutes=wait_target,
         max_wait_tolerance=max_wait_tolerance,
         triage_min_minutes=triage_min,
@@ -178,6 +180,16 @@ with st.sidebar.expander("⚡ Triggers & Thresholds", expanded=False):
         ),
     )
     max_occupancy = trigger_pct / 100.0
+
+    # slider for provider threshold
+    provider_threshold = st.slider(
+        "Provider Saturation Trigger", 
+        min_value=0.0, 
+        max_value=10.0, 
+        value=2.0, 
+        step=0.5,
+        help="Divert non-urgent patients if the provider queue ratio exceeds this value."
+    )
 
     wait_target = st.slider(
         "Wait-time target (minutes)", 
@@ -241,6 +253,7 @@ baseline_result, diversion_result = run_dashboard_simulations(
     nurses,
     doctors,
     max_occupancy,
+    provider_threshold,
     wait_target,
     max_wait_tolerance,
     triage_min,
