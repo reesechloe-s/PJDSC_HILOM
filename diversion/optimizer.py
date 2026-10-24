@@ -26,6 +26,7 @@ def optimize_diversion_allocations(
     simulation_result: SimulationResult,
     facilities_df: pd.DataFrame,
     max_occupancy_threshold: float = 0.85,
+    provider_threshold: float = 2.0,  # CHANGED: Added missing parameter
 ) -> OptimizationSummary:
     """
     Solves a Linear Program to load-balance excess non-urgent patients across
@@ -48,9 +49,18 @@ def optimize_diversion_allocations(
     hourly = simulation_result.hourly.copy()
     patients = simulation_result.patients.copy()
 
-    # Identify hours where bed utilization exceeded the redirection trigger threshold
+    # CHANGED: Composite threshold logic for saturation
     hourly["utilization"] = hourly["mean_bed_utilization"].fillna(0.0)
-    saturated_hours = hourly[hourly["utilization"] >= max_occupancy_threshold]
+    
+    # Safely fetch provider queue if it exists in the hourly logs, otherwise default to 0
+    # Update "mean_doctor_queue_length" if your engine.py uses a different column name
+    provider_queue = hourly.get("mean_doctor_queue_length", pd.Series([0] * len(hourly))) 
+    
+    # Identify hours where EITHER bed utilization OR provider queue exceeded the thresholds
+    saturated_hours = hourly[
+        (hourly["utilization"] >= max_occupancy_threshold) | 
+        (provider_queue >= provider_threshold)
+    ]
 
     # Calculate non-urgent excess demand during saturated hours
     hourly_log_list: list[dict[str, Any]] = []
@@ -127,7 +137,7 @@ def optimize_diversion_allocations(
     # Construct the structured LLM prompt context string
     llm_lines = [
         "=== DIVERSION LOAD-BALANCING OPTIMIZATION SUMMARY ===",
-        f"- Saturated Hours Identified (>= {max_occupancy_threshold * 100:.0f}% capacity): {len(saturated_hours)} hours",
+        f"- Saturated Hours Identified (Beds >= {max_occupancy_threshold * 100:.0f}% or Providers >= {provider_threshold}): {len(saturated_hours)} hours",
         f"- Total Excess Non-Urgent Patients Requiring Redirection: {total_excess}",
         f"- Total Patients Successfully Allocated to Network: {total_allocated}",
         f"- Unhandled Overflow (Network Capacity Deficit): {unhandled}",
