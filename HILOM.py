@@ -13,6 +13,7 @@ from facility_map import render_facility_map
 from kpis import compare_scenarios, hourly_dashboard_metrics, scenario_kpis
 from memo import build_memo_facts, generate_memo, get_api_key
 from queueing_theory import mmc_table
+from optimizer import optimize_diversion_allocations
 
 PROJECT_DIR = Path(__file__).resolve().parent
 FACILITIES_PATH = PROJECT_DIR / "data" / "alternative_facilities.parquet"
@@ -111,7 +112,7 @@ def run_dashboard_simulations(
     nurses: int,
     doctors: int,
     max_occupancy: float,
-    provider_threshold: float,  # I added this, Neil.
+    provider_threshold: float,
     wait_target: float,
     max_wait_tolerance: float,
     triage_min: float,
@@ -137,7 +138,7 @@ def run_dashboard_simulations(
         num_nurses=nurses,
         num_doctors=doctors,
         max_occupancy_before_diversion=max_occupancy,
-        provider_queue_threshold=provider_threshold, # also this.
+        provider_queue_threshold=provider_threshold,
         wait_target_minutes=wait_target,
         max_wait_tolerance=max_wait_tolerance,
         triage_min_minutes=triage_min,
@@ -260,6 +261,15 @@ baseline_result, diversion_result = run_dashboard_simulations(
     triage_max,
     treatment_mean,
 )
+
+# Run Optimization based on diversion triggers
+optimization_summary = optimize_diversion_allocations(
+    simulation_result=diversion_result,
+    facilities_df=edited_facilities,
+    max_occupancy_threshold=max_occupancy,
+    provider_threshold=provider_threshold
+)
+
 
 baseline_df = hourly_dashboard_metrics(baseline_result.hourly, baseline_result.patients, max_occupancy)
 sim_df = hourly_dashboard_metrics(diversion_result.hourly, diversion_result.patients, max_occupancy)
@@ -454,7 +464,8 @@ with tab4:
     memo_facts = build_memo_facts(
         params={
             "beds": beds, "nurses": nurses, "doctors": doctors,
-            "trigger_pct": trigger_pct, "wait_target_min": wait_target,
+            "trigger_pct": trigger_pct, "provider_threshold": provider_threshold, 
+            "wait_target_min": wait_target,
             "walkout_limit_min": max_wait_tolerance, "mean_treatment_min": treatment_mean,
         },
         kpi_table=kpi_table,
@@ -465,6 +476,9 @@ with tab4:
         diverted_total=diverted_total,
         forecast_df=forecast_df,
     )
+    # Inject optimization results into memo_facts so the LLM prompt can access them
+    memo_facts["unhandled_overflow"] = optimization_summary.unhandled_overflow
+
     facts_sig = hashlib.sha256(
         json.dumps(memo_facts, sort_keys=True, default=str).encode()
     ).hexdigest()
