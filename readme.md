@@ -60,4 +60,4 @@ Launch the Streamlit interface to configure your scenario parameters and run the
 ```bash
 streamlit run app.py
 ```
-*Note: A browser window will open automatically at `http://localhost:8501`. Once open, you can use the sidebar to manually configure capacity constraints, resource levels, and diversion thresholds before running the simulation.*
+*Note: A browser window will open automatically at localhost. Once open, you can use the sidebar to manually configure capacity constraints, resource levels, and diversion thresholds before running the simulation.*
