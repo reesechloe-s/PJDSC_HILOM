@@ -3,7 +3,7 @@ import unittest
 import pandas as pd
 
 from simulation.config import DEFAULT_CONFIG, SimulationConfig
-from simulation.engine3 import run_simulation
+from simulation.engine import run_simulation
 
 
 class SimulationTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class SimulationTests(unittest.TestCase):
             triage_max_minutes=1,
             treatment_mean_minutes=2,
             treatment_std_dev_minutes=0,
-            diversion_occupancy_threshold=None,
+            max_occupancy_before_diversion=None,
         )
 
         first = run_simulation(self.forecast([8, 8]), config=config, seed=7)
@@ -37,7 +37,7 @@ class SimulationTests(unittest.TestCase):
         pd.testing.assert_frame_equal(first.hourly, second.hourly)
 
     def test_default_resource_baseline_runs_without_diversion(self) -> None:
-        baseline_config = SimulationConfig(diversion_occupancy_threshold=None)
+        baseline_config = SimulationConfig(max_occupancy_before_diversion=None)
 
         result = run_simulation(
             self.forecast([8]),
@@ -63,7 +63,7 @@ class SimulationTests(unittest.TestCase):
             triage_max_minutes=0,
             treatment_mean_minutes=120,
             treatment_std_dev_minutes=0,
-            diversion_occupancy_threshold=0.0,
+            max_occupancy_before_diversion=0.0,
         )
         facilities = pd.DataFrame(
             {
@@ -83,6 +83,39 @@ class SimulationTests(unittest.TestCase):
         ]
         self.assertTrue((diverted == "non-urgent").all())
 
+    # CHANGED: Added a new test specifically for the provider queue threshold
+    def test_provider_queue_threshold_triggers_diversion(self) -> None:
+        config = SimulationConfig(
+            num_doctors=1,
+            num_nurses=2,
+            num_beds=100,  # Plentiful beds so occupancy threshold isn't hit
+            acuity_probabilities={"non-urgent": 1.0},
+            triage_min_minutes=0,
+            triage_max_minutes=0,
+            treatment_mean_minutes=120,
+            treatment_std_dev_minutes=0,
+            max_occupancy_before_diversion=1.0,  # Ensure bed threshold doesn't trigger
+            provider_queue_threshold=0.0,        # Trigger purely on provider queue saturation
+        )
+        facilities = pd.DataFrame(
+            {
+                "facility_id": ["A"],
+                "facility_name": ["Facility A"],
+                "travel_time_mins": [1],
+                "max_simultaneous_patients": [5],
+            }
+        )
+
+        # 5 patients arriving to a 1-doctor ED will immediately back up the provider queue
+        result = run_simulation(self.forecast([5]), config, facilities, seed=42)
+
+        # Confirm diversion triggered even though bed occupancy was low
+        self.assertTrue(result.patients["diversion_accepted"].any())
+        diverted = result.patients.loc[
+            result.patients["diversion_accepted"], "acuity"
+        ]
+        self.assertTrue((diverted == "non-urgent").all())
+
     def test_scenarios_use_the_same_arrivals_and_service_draws(self) -> None:
         config = SimulationConfig(
             num_doctors=2,
@@ -92,7 +125,7 @@ class SimulationTests(unittest.TestCase):
             triage_max_minutes=2,
             treatment_mean_minutes=3,
             treatment_std_dev_minutes=0.5,
-            diversion_occupancy_threshold=None,
+            max_occupancy_before_diversion=None, # CHANGED: diversion_occupancy_threshold to max_occupancy_before_diversion
         )
         facilities = pd.DataFrame(
             {
@@ -113,7 +146,7 @@ class SimulationTests(unittest.TestCase):
                 triage_max_minutes=2,
                 treatment_mean_minutes=3,
                 treatment_std_dev_minutes=0.5,
-                diversion_occupancy_threshold=0.0,
+                max_occupancy_before_diversion=0.0, # CHANGED: diversion_occupancy_threshold to max_occupancy_before_diversion
             ),
             facilities,
             seed=19,
@@ -138,7 +171,7 @@ class SimulationTests(unittest.TestCase):
             triage_max_minutes=0,
             treatment_mean_minutes=1,
             treatment_std_dev_minutes=0,
-            diversion_occupancy_threshold=0.0,
+            max_occupancy_before_diversion=0.0, # CHANGED: diversion_occupancy_threshold to max_occupancy_before_diversion
         )
         facilities = pd.DataFrame(
             {
