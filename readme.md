@@ -1,4 +1,4 @@
-# Project HILOM: Predictive Emergency Department Load Balancing
+# HILOM: Hospital Inflow and Optimization Model
 
 ## Problem Statement
 Public hospital Emergency Departments (EDs)—such as the Philippine General Hospital (UP-PGH)—frequently operate at or beyond capacity due to high volumes of unscheduled walk-ins. This saturation leads to extended wait times, resource exhaustion, and delayed care, particularly for predominantly indigent patient populations. Furthermore, external environmental shocks, such as severe weather events, can unpredictably alter healthcare-seeking behavior, causing sudden post-rain arrival surges that overwhelm fixed operational capacities.
