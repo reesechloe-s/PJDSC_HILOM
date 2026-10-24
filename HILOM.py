@@ -13,7 +13,7 @@ from facility_map import render_facility_map
 from kpis import compare_scenarios, hourly_dashboard_metrics, scenario_kpis
 from memo import build_memo_facts, generate_memo, get_api_key
 from queueing_theory import mmc_table
-from optimizer import optimize_diversion_allocations
+from diversion.optimizer import optimize_diversion_allocations
 
 PROJECT_DIR = Path(__file__).resolve().parent
 FACILITIES_PATH = PROJECT_DIR / "data" / "alternative_facilities.parquet"
