@@ -10,6 +10,8 @@ class SimulationConfig:
     num_doctors: int = 4
     num_nurses: int = 13
     num_beds: int = 70
+    provider_queue_threshold: float = 2.0 #Default saturation ratio to be configured in streamlit user side's slider
+    
     acuity_probabilities: dict[str, float] = field(
         default_factory=lambda: {
             "emergent": 0.24,
