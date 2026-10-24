@@ -20,8 +20,61 @@ FORECAST_PATH = PROJECT_DIR / "artifacts" / "forecasting" / "forecast.parquet"
 RANDOM_SEED = 42
 
 st.set_page_config(page_title="ED Load Balancer", layout="wide")
+
+st.markdown("""
+<style>
+    /* Dynamically adapt to Streamlit's Light/Dark theme toggle */
+    .stApp {
+        background-color: var(--background-color);
+        color: var(--text-color);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    
+    /* Container cards that switch colors based on mode */
+    div[data-testid="stVerticalBlock"] > div[style*="border"] {
+        background-color: var(--secondary-background-color) !important;
+        border: 1px solid rgba(128, 128, 128, 0.2) !important;
+        border-radius: 12px;
+        padding: 1.25rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+
+    /* Metric Cards Styling */
+    div[data-testid="stMetric"] {
+        background-color: var(--secondary-background-color) !important;
+        border: 1px solid rgba(128, 128, 128, 0.2) !important;
+        padding: 16px;
+        border-radius: 10px;
+    }
+    div[data-testid="stMetricLabel"] p {
+        font-weight: 500;
+    }
+    div[data-testid="stMetricValue"] div {
+        font-weight: 700;
+    }
+
+    /* Status badges */
+    .badge-fail {
+        background-color: rgba(244, 63, 94, 0.15);
+        color: #fb7185;
+        padding: 3px 10px;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 0.8rem;
+    }
+    .badge-pass {
+        background-color: rgba(16, 185, 129, 0.15);
+        color: #34d399;
+        padding: 3px 10px;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 0.8rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("Emergency Department Load Balancer")
-st.caption("Decision-support tool using SARIMAX forecast data.")
+st.caption("Clinical decision-support tool utilizing SARIMAX forecasting and discrete event simulation.")
 
 
 @st.cache_data
@@ -37,8 +90,7 @@ def load_forecast() -> pd.DataFrame:
 
 
 def _get_api_key():
-    """Gemini key from the environment, a .env file next to this script, or Streamlit secrets.
-    None means 'use the template memo'."""
+    """Gemini key from environment, .env file, or Streamlit secrets."""
     try:
         secrets = st.secrets
     except Exception:
@@ -47,7 +99,7 @@ def _get_api_key():
 
 
 def _slider_default(value, lo, hi):
-    """Clamp a config default into the slider range (Streamlit raises if it is outside)."""
+    """Clamp a config default into the slider range."""
     return min(max(value, lo), hi)
 
 
@@ -102,62 +154,63 @@ def run_dashboard_simulations(
     return baseline, diversion
 
 
-st.sidebar.header("Controls")
+# Organized Sidebar Controls with Collapsible Clinical Groupings
+st.sidebar.markdown("### 🎛️ Simulation Parameters")
 
-# Resource Capacities
-beds = st.sidebar.slider(
-    "Bed capacity", min_value=1, max_value=400, value=DEFAULT_CONFIG.num_beds
-)
-nurses = st.sidebar.slider(
-    "Triage nurses on duty", min_value=1, max_value=200, value=DEFAULT_CONFIG.num_nurses
-)
-doctors = st.sidebar.slider(
-    "Doctors on duty", min_value=1, max_value=200, value=DEFAULT_CONFIG.num_doctors
-)
+with st.sidebar.expander("🏥 Facility & Staffing", expanded=True):
+    beds = st.slider(
+        "Bed capacity", min_value=1, max_value=400, value=DEFAULT_CONFIG.num_beds
+    )
+    nurses = st.slider(
+        "Triage nurses on duty", min_value=1, max_value=200, value=DEFAULT_CONFIG.num_nurses
+    )
+    doctors = st.slider(
+        "Doctors on duty", min_value=1, max_value=200, value=DEFAULT_CONFIG.num_doctors
+    )
 
-# Thresholds & Limits
-trigger_pct = st.sidebar.slider(
-    "Redirection Trigger (% of capacity reached)", 
-    min_value=50, 
-    max_value=100, 
-    value=_slider_default(
-        int(round((DEFAULT_CONFIG.max_occupancy_before_diversion or 0.85) * 100)), 50, 100
-    ),
-)
-max_occupancy = trigger_pct / 100.0
+with st.sidebar.expander("⚡ Triggers & Thresholds", expanded=False):
+    trigger_pct = st.slider(
+        "Redirection Trigger (% of capacity reached)", 
+        min_value=50, 
+        max_value=100, 
+        value=_slider_default(
+            int(round((DEFAULT_CONFIG.max_occupancy_before_diversion or 0.85) * 100)), 50, 100
+        ),
+    )
+    max_occupancy = trigger_pct / 100.0
 
-wait_target = st.sidebar.slider(
-    "Wait-time target (minutes)", 
-    min_value=0, 
-    max_value=120, 
-    value=_slider_default(int(DEFAULT_CONFIG.wait_target_minutes), 0, 120),
-)
-max_wait_tolerance = st.sidebar.slider(
-    "Walkout time limit (minutes)", 
-    min_value=30, 
-    max_value=1440, 
-    value=_slider_default(int(DEFAULT_CONFIG.max_wait_tolerance), 30, 1440),
-)
+    wait_target = st.slider(
+        "Wait-time target (minutes)", 
+        min_value=0, 
+        max_value=120, 
+        value=_slider_default(int(DEFAULT_CONFIG.wait_target_minutes), 0, 120),
+    )
+    max_wait_tolerance = st.slider(
+        "Walkout time limit (minutes)", 
+        min_value=30, 
+        max_value=1440, 
+        value=_slider_default(int(DEFAULT_CONFIG.max_wait_tolerance), 30, 1440),
+    )
 
-# Service Times
-triage_min = st.sidebar.slider(
-    "Triage min time (mins)", 
-    min_value=1.0, 
-    max_value=10.0, 
-    value=_slider_default(float(DEFAULT_CONFIG.triage_min_minutes), 1.0, 10.0),
-)
-triage_max = st.sidebar.slider(
-    "Triage max time (mins)", 
-    min_value=float(triage_min), 
-    max_value=30.0, 
-    value=_slider_default(float(DEFAULT_CONFIG.triage_max_minutes), float(triage_min), 30.0),
-)
-treatment_mean = st.sidebar.slider(
-    "Mean treatment time (minutes)", 
-    min_value=1,  # 0 would make service times degenerate
-    max_value=240, 
-    value=_slider_default(int(DEFAULT_CONFIG.treatment_mean_minutes), 1, 240),
-)
+with st.sidebar.expander("⏱️ Timing & Treatment", expanded=False):
+    triage_min = st.slider(
+        "Triage min time (mins)", 
+        min_value=1.0, 
+        max_value=10.0, 
+        value=_slider_default(float(DEFAULT_CONFIG.triage_min_minutes), 1.0, 10.0),
+    )
+    triage_max = st.slider(
+        "Triage max time (mins)", 
+        min_value=float(triage_min), 
+        max_value=30.0, 
+        value=_slider_default(float(DEFAULT_CONFIG.triage_max_minutes), float(triage_min), 30.0),
+    )
+    treatment_mean = st.slider(
+        "Mean treatment time (minutes)", 
+        min_value=1, 
+        max_value=240, 
+        value=_slider_default(int(DEFAULT_CONFIG.treatment_mean_minutes), 1, 240),
+    )
 
 forecast_df = load_forecast()
 facilities_raw = load_facilities()
@@ -180,7 +233,7 @@ edited_facilities = st.data_editor(
     hide_index=True,
 )
 
-# Run simulations using the EDITED facilities and new slider parameters
+# Run simulations using edited facilities and slider parameters
 baseline_result, diversion_result = run_dashboard_simulations(
     forecast_df,
     edited_facilities,
@@ -243,24 +296,32 @@ with tab1:
             name="Forecast",
         )
     )
-    fig.update_layout(xaxis_title="Time", yaxis_title="Patients per hour")
-    st.plotly_chart(fig, width="stretch")
+    fig.update_layout(xaxis_title="Time", yaxis_title="Patients per hour", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
     st.subheader("DES waiting time and bed utilization")
     peak_wait = sim_df["wait_min"].max()
     peak_util = sim_df["utilization"].max() * 100
     sat_hours = int(sim_df["saturated"].sum())
+    
+    # Structured Container Metrics Cards
     c1, c2, c3 = st.columns(3)
-    c1.metric("Peak mean wait", f"{peak_wait:.0f} min")
-    c2.metric("Peak sampled bed utilization", f"{peak_util:.0f}%")
-    c3.metric("Hours at diversion threshold", sat_hours)
+    with c1:
+        with st.container(border=True):
+            st.metric("Peak mean wait", f"{peak_wait:.0f} min")
+    with c2:
+        with st.container(border=True):
+            st.metric("Peak sampled bed utilization", f"{peak_util:.0f}%")
+    with c3:
+        with st.container(border=True):
+            st.metric("Hours at diversion threshold", sat_hours)
 
-    st.markdown("**Proposal targets: baseline vs. diversion (same seed, same demand)**")
+    st.markdown("### Proposal targets: baseline vs. diversion (same seed, same demand)")
     st.dataframe(
         kpi_table.style.format({"Result": "{:.2f}", "Target": "{:.2f}"}, na_rep="n/a"),
         hide_index=True,
-        width="stretch",
+        use_container_width=True,
     )
     st.caption(
         "Reductions are fractions (0.10 = 10%). Capacity violation = hour with all beds "
@@ -288,13 +349,18 @@ with tab2:
         )
     )
     wait_fig.add_hline(y=wait_target, line_dash="dash")
-    wait_fig.update_layout(xaxis_title="Time", yaxis_title="Mean wait (minutes)")
-    st.plotly_chart(wait_fig, width="stretch")
+    wait_fig.update_layout(xaxis_title="Time", yaxis_title="Mean wait (minutes)", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(wait_fig, use_container_width=True)
 
-    st.markdown("**Where the waiting happens (with diversion)**")
+    st.markdown("### Where the waiting happens (with diversion)")
     u1, u2 = st.columns(2)
-    u1.metric("Peak doctor utilization", f"{sim_df['mean_provider_utilization'].fillna(0).max() * 100:.0f}%")
-    u2.metric("Peak triage-nurse utilization", f"{sim_df['mean_nurse_utilization'].fillna(0).max() * 100:.0f}%")
+    with u1:
+        with st.container(border=True):
+            st.metric("Peak doctor utilization", f"{sim_df['mean_provider_utilization'].fillna(0).max() * 100:.0f}%")
+    with u2:
+        with st.container(border=True):
+            st.metric("Peak triage-nurse utilization", f"{sim_df['mean_nurse_utilization'].fillna(0).max() * 100:.0f}%")
+            
     stage_fig = go.Figure()
     for col, label in (
         ("mean_triage_wait", "Triage"),
@@ -304,8 +370,8 @@ with tab2:
         stage_fig.add_trace(
             go.Scatter(x=sim_df["timestamp"], y=sim_df[col].fillna(0), name=label, stackgroup="wait")
         )
-    stage_fig.update_layout(xaxis_title="Time", yaxis_title="Mean wait by stage (minutes)")
-    st.plotly_chart(stage_fig, width="stretch")
+    stage_fig.update_layout(xaxis_title="Time", yaxis_title="Mean wait by stage (minutes)", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(stage_fig, use_container_width=True)
 
     utilization_fig = go.Figure(
         go.Scatter(
@@ -316,9 +382,9 @@ with tab2:
     )
     utilization_fig.add_hline(y=trigger_pct, line_dash="dash")
     utilization_fig.update_layout(
-        xaxis_title="Time", yaxis_title="Sampled bed utilization (%)"
+        xaxis_title="Time", yaxis_title="Sampled bed utilization (%)", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
     )
-    st.plotly_chart(utilization_fig, width="stretch")
+    st.plotly_chart(utilization_fig, use_container_width=True)
 
     with st.expander("Queueing-theory cross-check (analytic M/M/c on beds)"):
         analytic = mmc_table(
@@ -340,21 +406,27 @@ with tab2:
 
 with tab3:
     st.subheader("Simulated diversion")
-    st.metric(
-        "Peak non-urgent diversion",
-        f"{sim_df['divert_pct'].max():.0f}% of non-urgent patients",
-    )
+    m1, m2 = st.columns(2)
+    with m1:
+        with st.container(border=True):
+            st.metric(
+                "Peak non-urgent diversion",
+                f"{sim_df['divert_pct'].max():.0f}% of non-urgent patients",
+            )
     patients_log = diversion_result.patients
     diverted_total = (
         int(patients_log["diversion_accepted"].sum())
         if "diversion_accepted" in patients_log.columns else 0
     )
-    st.metric("Patients diverted", f"{diverted_total}")
-    st.write("Alternative facilities and accepted referrals")
+    with m2:
+        with st.container(border=True):
+            st.metric("Patients diverted", f"{diverted_total}")
+            
+    st.markdown("### Alternative facilities and accepted referrals")
     render_facility_map(facility_results)
     
     with st.expander("View Raw Patient Simulation Logs"):
-        st.dataframe(patients_log, width="stretch")
+        st.dataframe(patients_log, use_container_width=True)
 
 with tab4:
     st.subheader("Draft policy memo")
@@ -385,7 +457,7 @@ with tab4:
     ).hexdigest()
 
     if st.button("Generate memo"):
-        with st.spinner("Drafting memo..."):
+        with st.spinner("Drafting memo via Gemini..."):
             result = generate_memo(memo_facts, api_key=_get_api_key())
         st.session_state["memo_text"] = result.text
         st.session_state["memo_source"] = result.source
@@ -404,4 +476,6 @@ with tab4:
         )
     if st.session_state.get("memo_sig") not in (None, facts_sig):
         st.warning("Settings or results changed since this memo was drafted. Regenerate it.")
-    st.text_area("Memo draft (for human review)", key="memo_text", height=420)
+        
+    with st.container(border=True):
+        st.text_area("Memo draft (for human review)", key="memo_text", height=420)
