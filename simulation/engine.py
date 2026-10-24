@@ -105,6 +105,9 @@ class _EmergencyDepartment:
     def _bed_pressure(self) -> float:
         return (self.beds.count + len(self.beds.queue)) / self.config.num_beds
 
+    def _provider_saturation(self) -> float:
+        return len(self.providers.queue) / self.config.num_doctors
+
     def _available_facility(self) -> dict[str, Any] | None:
         for facility in sorted(
             self.facilities, key=lambda item: float(item["travel_time_mins"])
@@ -187,12 +190,17 @@ class _EmergencyDepartment:
             record["triage_wait"] = self.env.now - arrival_time
             yield self.env.timeout(triage_service)
 
-        # Diversion check using max_occupancy_before_diversion
+        # Composite Diversion check (bed occupancy OR provider queue saturation)
         max_occupancy = self.config.max_occupancy_before_diversion
+        provider_threshold = getattr(self.config, "provider_queue_threshold", 2.0)
+        
         if (
             acuity == "non-urgent"
             and max_occupancy is not None
-            and self._bed_pressure() >= max_occupancy
+            and (
+                self._bed_pressure() >= max_occupancy 
+                or self._provider_saturation() >= provider_threshold
+            )
         ):
             accepted = yield from self._attempt_diversion(record)
             if accepted:
