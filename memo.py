@@ -21,11 +21,12 @@ import pandas as pd
 
 # Model name from Google's current Gemini quickstart; override with HILOM_LLM_MODEL if AI Studio
 # lists a different one for your key.
-DEFAULT_MODEL = os.environ.get("HILOM_LLM_MODEL", "gemini-3.7-flash")
-FALLBACK_MODEL = os.environ.get("HILOM_LLM_FALLBACK_MODEL", "gemini-2.5-flash")
+# Replace lines 20-22 in memo.py with this:
+DEFAULT_MODEL = os.environ.get("HILOM_LLM_MODEL", "gemini-3.8-flash")
+FALLBACK_MODEL = os.environ.get("HILOM_LLM_FALLBACK_MODEL", "gemini-3.8-flash")
 RETRY_DELAY_S = 1.0
 API_KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")  # AI Studio keys use either name
-LLM_TIMEOUT_S = 10.0  # proposal target: memo within 10 seconds
+LLM_TIMEOUT_S = 30.0  # proposal target: memo within 10 seconds
 
 SYSTEM_PROMPT = (
     "You draft internal triage-protocol memoranda for hospital administrators and local "
